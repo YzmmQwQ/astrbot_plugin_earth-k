@@ -121,6 +121,11 @@ class EarthKPlugin(Star):
             return
         yield event.image_result(str(image))
 
+    @filter.command("弹琴帮助")
+    async def piano_help(self, event: AstrMessageEvent):
+        event.stop_event()
+        yield event.plain_result(self.service.piano_help_text())
+
     @filter.command("土块状态")
     async def state(self, event: AstrMessageEvent):
         event.stop_event()

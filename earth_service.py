@@ -31,6 +31,7 @@ HELP_GROUPS = [
             ("/了解 <角色>", "发送本地角色资料图"),
             ("/大话骰规则", "发送大话骰规则图"),
             ("/土块状态", "查看 AstrBot 宿主进程和系统状态图"),
+            ("/弹琴帮助", "查看音频演奏迁移说明"),
             ("/土块版本", "查看迁移版本"),
             ("/土块渲染测试", "管理员私聊测试本地 HTML 渲染"),
             ("/土块更新", "管理员调用 AstrBot 官方插件更新器"),
@@ -79,6 +80,17 @@ class EarthService:
                     version = line.lstrip("# ").strip()
                     break
         return f"Earth-K AstrBot 迁移版\n当前版本：{version}\n迁移状态：基础框架与本地 HTML 渲染已完成"
+
+    @staticmethod
+    def piano_help_text() -> str:
+        return (
+            "音频演奏说明\n"
+            "原版支持：钢琴、八音盒、古筝、吉他、萨克斯、小提琴、吹箫、西域琴。\n"
+            "音符支持 -1 到 -7、1 到 7、+1 到 +7；钢琴另支持 ++1 到 ++7。\n"
+            "音符之间用空格或逗号分隔，末尾可用 |200 设置速度，例如：\n"
+            "/钢琴 1 2 3 1 1 2 3 1|200\n\n"
+            "当前状态：说明已迁移；音频合成仍在迁移，AstrBot 版本暂不会执行演奏命令。"
+        )
 
     def character_image(self, character: str) -> Path | None:
         name = character.strip().replace("/", "").replace("\\", "")
