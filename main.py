@@ -126,6 +126,45 @@ class EarthKPlugin(Star):
         event.stop_event()
         yield event.plain_result(self.service.piano_help_text())
 
+    @filter.command("土块表情列表")
+    async def meme_list(self, event: AstrMessageEvent):
+        event.stop_event()
+        try:
+            image = await self.service.meme_list()
+            yield event.chain_result([Comp.Image.fromBytes(image)])
+        except Exception as error:
+            logger.exception("Earth-K 表情列表获取失败")
+            yield event.plain_result(f"表情列表获取失败：{error}")
+
+    @filter.command("表情合成")
+    async def meme_render(self, event: AstrMessageEvent, payload: str = ""):
+        event.stop_event()
+        parts = payload.strip().split()
+        if not parts:
+            yield event.plain_result("用法：/表情合成 <关键词> [文字]，图片请和命令一起发送。")
+            return
+
+        keyword, texts = parts[0], parts[1:]
+        images = []
+        for message in event.get_messages():
+            if isinstance(message, Comp.Image):
+                image = await self.service.message_image_bytes(message)
+                if image:
+                    images.append(image)
+        result, error = await self.service.render_meme(
+            keyword,
+            texts,
+            images,
+            event.get_sender_name(),
+        )
+        if error:
+            yield event.plain_result(error)
+            return
+        if result is None:
+            yield event.plain_result("表情生成失败：服务没有返回图片。")
+            return
+        yield event.chain_result([Comp.Image.fromBytes(result)])
+
     @filter.command("土块状态")
     async def state(self, event: AstrMessageEvent):
         event.stop_event()

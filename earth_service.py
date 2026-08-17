@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import html
+import json
 import os
 import platform
 import random
@@ -32,6 +35,8 @@ HELP_GROUPS = [
             ("/大话骰规则", "发送大话骰规则图"),
             ("/土块状态", "查看 AstrBot 宿主进程和系统状态图"),
             ("/弹琴帮助", "查看音频演奏迁移说明"),
+            ("/土块表情列表", "查看可用的表情合成关键词"),
+            ("/表情合成 <关键词> [文字]", "用当前消息附带的图片生成表情"),
             ("/土块版本", "查看迁移版本"),
             ("/土块渲染测试", "管理员私聊测试本地 HTML 渲染"),
             ("/土块更新", "管理员调用 AstrBot 官方插件更新器"),
@@ -70,6 +75,19 @@ class EarthService:
     def __init__(self, plugin_dir: Path) -> None:
         self.plugin_dir = plugin_dir
         self.resources = plugin_dir / "resources"
+        self.meme_url = "https://h.winterqkl.cn/memes/"
+        self._meme_keywords: dict[str, dict[str, object]] = {}
+        meme_file = self.resources / "bq.json"
+        if meme_file.is_file():
+            try:
+                entries = json.loads(meme_file.read_text(encoding="utf-8"))
+                for item in entries.values():
+                    if not isinstance(item, dict):
+                        continue
+                    for keyword in item.get("keywords", []):
+                        self._meme_keywords[str(keyword)] = item
+            except (OSError, json.JSONDecodeError):
+                pass
 
     def version_text(self) -> str:
         changelog = self.plugin_dir / "CHANGELOG.md"
@@ -102,6 +120,109 @@ class EarthService:
     def dice_rules_image(self) -> Path | None:
         image = self.resources / "img" / "骰子规则.jpg"
         return image if image.is_file() else None
+
+    async def meme_list(self) -> bytes:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(f"{self.meme_url}render_list") as response:
+                response.raise_for_status()
+                return await response.read()
+
+    async def render_meme(
+        self,
+        keyword: str,
+        texts: list[str],
+        images: list[bytes],
+        sender_name: str,
+    ) -> tuple[bytes | None, str | None]:
+        item = self._meme_keywords.get(keyword.strip())
+        if not item:
+            return None, "找不到这个表情关键词，请先发送 /土块表情列表 查看支持的关键词。"
+
+        params = item.get("params_type") or {}
+        min_images = int(params.get("min_images", 0))
+        max_images = int(params.get("max_images", min_images))
+        min_texts = int(params.get("min_texts", 0))
+        max_texts = int(params.get("max_texts", min_texts))
+        if not min_images <= len(images) <= max_images:
+            return None, f"该表情需要 {min_images} 到 {max_images} 张图片，当前收到 {len(images)} 张。"
+        if not min_texts <= len(texts) <= max_texts:
+            return None, f"该表情需要 {min_texts} 到 {max_texts} 段文字，当前收到 {len(texts)} 段。"
+
+        args = self._meme_args(str(item.get("key", "")), texts, sender_name)
+        form = aiohttp.FormData()
+        for index, image in enumerate(images):
+            form.add_field(
+                "images",
+                image,
+                filename=f"earth-k-{index}.jpg",
+                content_type="application/octet-stream",
+            )
+        for text_value in texts:
+            form.add_field("texts", text_value)
+        if args:
+            form.add_field("args", args)
+
+        timeout = aiohttp.ClientTimeout(total=30)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{self.meme_url}{item['key']}/", data=form) as response:
+                    if response.status >= 300:
+                        return None, f"表情服务返回错误（HTTP {response.status}），请稍后重试。"
+                    return await response.read(), None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            return None, f"表情服务暂时不可用：{error}"
+
+    @staticmethod
+    def _meme_args(key: str, texts: list[str], sender_name: str) -> str:
+        value = texts[0].strip() if texts else ""
+        args: dict[str, object] = {
+            "user_infos": [{"name": sender_name or "", "gender": "unknown"}]
+        }
+        if key == "look_flat":
+            args["ratio"] = int(value) if value.isdigit() else 2
+        elif key == "crawl":
+            args["number"] = int(value) if value.isdigit() else random.randint(1, 92)
+        elif key == "symmetric":
+            args["direction"] = {"左": "left", "右": "right", "上": "top", "下": "bottom"}.get(value, "left")
+        elif key in {"petpet", "jiji_king", "kirby_hammer"}:
+            args["circle"] = value.startswith("圆")
+        elif key == "my_friend":
+            args["name"] = value or sender_name
+        elif key == "looklook":
+            args["mirror"] = value == "翻转"
+        elif key == "always":
+            args["mode"] = {"": "normal", "循环": "loop", "套娃": "circle"}.get(value, "normal")
+        elif key in {"gun", "bubble_tea"}:
+            args["position"] = {"左": "left", "右": "right", "两边": "both"}.get(value, "right")
+        return json.dumps(args, ensure_ascii=False)
+
+    @staticmethod
+    async def message_image_bytes(message: object) -> bytes | None:
+        """Read an image component from the current AstrBot message."""
+        source = getattr(message, "url", None) or getattr(message, "file", None)
+        if not source:
+            return None
+        if str(source).startswith("base64://"):
+            try:
+                return base64.b64decode(str(source)[9:])
+            except (ValueError, TypeError):
+                return None
+        if str(source).startswith(("http://", "https://")):
+            timeout = aiohttp.ClientTimeout(total=15)
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(str(source)) as response:
+                        if response.status < 300:
+                            return await response.read()
+            except aiohttp.ClientError:
+                return None
+            return None
+        path = Path(str(source).removeprefix("file:///"))
+        try:
+            return path.read_bytes() if path.is_file() else None
+        except OSError:
+            return None
 
     def state_html(self) -> str:
         """Build the original status layout from AstrBot host metrics."""
