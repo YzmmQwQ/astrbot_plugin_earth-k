@@ -103,6 +103,15 @@ class EarthKPlugin(Star):
             logger.exception("Earth-K 运势查询失败")
             yield event.plain_result(f"运势查询失败：{error}")
 
+    @filter.command("了解")
+    async def character_info(self, event: AstrMessageEvent, character: str = ""):
+        event.stop_event()
+        image = self.service.character_image(character)
+        if not image:
+            yield event.plain_result("该角色资料图正在筹备中，欸嘿")
+            return
+        yield event.image_result(str(image))
+
     @filter.command("卜卦")
     async def divination(self, event: AstrMessageEvent):
         event.stop_event()

@@ -17,6 +17,7 @@ HELP_GROUPS = [
             ("/卜卦", "周易占卜，每日一卦"),
             ("/练习记忆力", "观察数字卡后，用 /我猜 <字母> 作答"),
             ("/今日运势", "查看今日运势"),
+            ("/了解 <角色>", "发送本地角色资料图"),
             ("/土块版本", "查看迁移版本"),
             ("/土块渲染测试", "管理员私聊测试本地 HTML 渲染"),
             ("/土块更新", "管理员调用 AstrBot 官方插件更新器"),
@@ -65,6 +66,13 @@ class EarthService:
                     version = line.lstrip("# ").strip()
                     break
         return f"Earth-K AstrBot 迁移版\n当前版本：{version}\n迁移状态：基础框架与本地 HTML 渲染已完成"
+
+    def character_image(self, character: str) -> Path | None:
+        name = character.strip().replace("/", "").replace("\\", "")
+        if not name or len(name) > 32:
+            return None
+        image = self.resources / "img" / "KnowAboutCharacter-IMG" / f"{name}.jpg"
+        return image if image.is_file() else None
 
     async def daily_fortune(self, user_id: str) -> dict[str, str]:
         """Fetch the old service when available, with a deterministic local fallback."""
