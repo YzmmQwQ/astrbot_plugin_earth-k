@@ -18,6 +18,7 @@ HELP_GROUPS = [
             ("/练习记忆力", "观察数字卡后，用 /我猜 <字母> 作答"),
             ("/今日运势", "查看今日运势"),
             ("/了解 <角色>", "发送本地角色资料图"),
+            ("/大话骰规则", "发送大话骰规则图"),
             ("/土块版本", "查看迁移版本"),
             ("/土块渲染测试", "管理员私聊测试本地 HTML 渲染"),
             ("/土块更新", "管理员调用 AstrBot 官方插件更新器"),
@@ -72,6 +73,10 @@ class EarthService:
         if not name or len(name) > 32:
             return None
         image = self.resources / "img" / "KnowAboutCharacter-IMG" / f"{name}.jpg"
+        return image if image.is_file() else None
+
+    def dice_rules_image(self) -> Path | None:
+        image = self.resources / "img" / "骰子规则.jpg"
         return image if image.is_file() else None
 
     async def daily_fortune(self, user_id: str) -> dict[str, str]:

@@ -112,6 +112,15 @@ class EarthKPlugin(Star):
             return
         yield event.image_result(str(image))
 
+    @filter.command("大话骰规则")
+    async def dice_rules(self, event: AstrMessageEvent):
+        event.stop_event()
+        image = self.service.dice_rules_image()
+        if not image:
+            yield event.plain_result("大话骰规则图片缺失")
+            return
+        yield event.image_result(str(image))
+
     @filter.command("卜卦")
     async def divination(self, event: AstrMessageEvent):
         event.stop_event()
