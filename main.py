@@ -29,6 +29,8 @@ class EarthKPlugin(Star):
         self.service = EarthService(self.plugin_dir)
         self.renderer: EarthRenderer | None = None
         self._divination_waiting: set[str] = set()
+        self._memory_games: dict[str, dict[str, object]] = {}
+        self._memory_scores: dict[tuple[str, str], int] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -105,6 +107,75 @@ class EarthKPlugin(Star):
         except Exception as error:
             logger.exception("Earth-K 占卜失败")
             yield event.plain_result(f"占卜失败：{error}")
+
+    @filter.command("练习记忆力")
+    async def memory_start(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not self.renderer:
+            yield event.plain_result("本地 HTML 渲染器未启动")
+            return
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        if session in self._memory_games:
+            yield event.plain_result("当前已经有一轮记忆力练习，请先回答上一轮。")
+            return
+        game = self.service.new_memory_round()
+        self._memory_games[session] = game
+        positions = game["positions"]
+        target = int(game["target"])
+        renderer = self.renderer
+        try:
+            numeric = [str(index) for index in range(9)]
+            yield event.image_result(await renderer.render(self.service.memory_card(positions, numeric)))
+            yield event.plain_result("请观察数字卡 10 秒，随后回答目标数字对应的字母。")
+            await asyncio.sleep(10)
+            yield event.image_result(await renderer.render(self.service.memory_card(positions, list(game["labels"]))))
+            yield event.plain_result(f"请回答数字 {target} 对应的字母，例如：/我猜 a")
+        except Exception as error:
+            self._memory_games.pop(session, None)
+            logger.exception("Earth-K 记忆力练习失败")
+            yield event.plain_result(f"记忆力练习失败：{error}")
+
+    @filter.command("我猜")
+    async def memory_answer(self, event: AstrMessageEvent, answer: str = ""):
+        event.stop_event()
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        game = self._memory_games.pop(session, None)
+        if not game:
+            yield event.plain_result("当前没有进行中的记忆力练习，请先发送 /练习记忆力。")
+            return
+        labels = list(game["labels"])
+        target = int(game["target"])
+        expected = labels[target]
+        if answer.strip().lower() != expected:
+            yield event.plain_result(f"回答错误，数字 {target} 对应的字母是 {expected}。")
+            return
+        sender = str(event.get_sender_id())
+        score_key = (session, sender)
+        self._memory_scores[score_key] = self._memory_scores.get(score_key, 0) + 1
+        positions = list(game["positions"])
+        try:
+            if self.renderer:
+                numeric = [str(index) for index in range(9)]
+                image = await self.renderer.render(self.service.memory_card(positions, numeric, target))
+                yield event.image_result(image)
+            yield event.plain_result(
+                f"恭喜你回答正确！本轮得分：{self._memory_scores[score_key]}"
+            )
+        except Exception as error:
+            logger.exception("Earth-K 记忆力结果渲染失败")
+            yield event.plain_result(f"回答正确，但结果图片渲染失败：{error}")
+
+    @filter.command("重置记忆分数")
+    async def memory_reset(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.is_admin():
+            yield event.plain_result("该命令仅限管理员使用")
+            return
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        for key in [key for key in self._memory_scores if key[0] == session]:
+            self._memory_scores.pop(key, None)
+        self._memory_games.pop(session, None)
+        yield event.plain_result("当前会话的记忆力分数已重置")
 
     @filter.command("土块渲染测试")
     async def render_test(self, event: AstrMessageEvent):

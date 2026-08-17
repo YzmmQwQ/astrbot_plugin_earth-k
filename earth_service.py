@@ -11,6 +11,7 @@ HELP_GROUPS = [
         "已迁移功能",
         [
             ("/卜卦", "周易占卜，每日一卦"),
+            ("/练习记忆力", "观察数字卡后，用 /我猜 <字母> 作答"),
             ("/土块版本", "查看迁移版本"),
             ("/土块渲染测试", "管理员私聊测试本地 HTML 渲染"),
             ("/土块更新", "管理员调用 AstrBot 官方插件更新器"),
@@ -116,6 +117,39 @@ body {{ background-image: url('{bg}'); }}
         upper = TRIGRAMS[bits[:3]]
         lower = TRIGRAMS[bits[3:]]
         return name, f"上卦{upper}，下卦{lower}。顺势而为，守正待时。"
+
+    def memory_card(
+        self,
+        positions: list[tuple[int, int]],
+        labels: list[str],
+        highlighted: int = -1,
+    ) -> str:
+        css_path = self.resources / "html" / "Memory" / "html.css"
+        renderer = EarthRenderer(Path("."))
+        css = renderer.inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        items = []
+        for index, ((left, top), label) in enumerate(zip(positions, labels)):
+            background = "background-color:rgb(255 0 0 / 70%);" if index == highlighted else ""
+            items.append(
+                f'<span class="jw" style="left:{left}px;top:{top}px;{background}">{label}</span>'
+            )
+        return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+body {{ position: relative; margin: 0; background: #f5f1e8; }}
+.jw {{ position: absolute; }}
+.js {{ position: absolute; }}
+</style></head><body>{''.join(items)}
+<div class="js">发送 /我猜 + 字母回答</div>
+<p class="js" style="top:960px">Created By AstrBot & Earth-K-Plugin</p>
+</body></html>"""
+
+    @staticmethod
+    def new_memory_round() -> dict[str, object]:
+        positions = [(random.randint(100, 900), random.randint(100, 900)) for _ in range(9)]
+        labels = list("abcdefghi")
+        random.shuffle(labels)
+        target = random.randrange(9)
+        return {"positions": positions, "labels": labels, "target": target}
 
     def _font_uri(self) -> str:
         font = self.resources / "font" / "jty.OTF"
