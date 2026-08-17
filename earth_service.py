@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import random
+import re
 import shutil
 import sys
 import time
@@ -35,6 +36,7 @@ HELP_GROUPS = [
             ("/大话骰规则", "发送大话骰规则图"),
             ("/土块状态", "查看 AstrBot 宿主进程和系统状态图"),
             ("/弹琴帮助", "查看音频演奏迁移说明"),
+            ("/钢琴 <音符>", "使用本地音色演奏，其他乐器命令同理"),
             ("/土块表情列表", "查看可用的表情合成关键词"),
             ("/表情合成 <关键词> [文字]", "用当前消息附带的图片生成表情"),
             ("/土块版本", "查看迁移版本"),
@@ -107,8 +109,104 @@ class EarthService:
             "音符支持 -1 到 -7、1 到 7、+1 到 +7；钢琴另支持 ++1 到 ++7。\n"
             "音符之间用空格或逗号分隔，末尾可用 |200 设置速度，例如：\n"
             "/钢琴 1 2 3 1 1 2 3 1|200\n\n"
-            "当前状态：说明已迁移；音频合成仍在迁移，AstrBot 版本暂不会执行演奏命令。"
+            "当前状态：音频合成已迁移；宿主需要安装 FFmpeg 才能发送演奏结果。"
         )
+
+    async def play_piano(
+        self,
+        instrument: str,
+        notation: str,
+        output_path: Path,
+    ) -> tuple[Path | None, str | None]:
+        instrument_dirs = {
+            "钢琴": "gangqin",
+            "八音盒": "ba",
+            "古筝": "gu",
+            "吉他": "jita",
+            "萨克斯": "sa",
+            "小提琴": "ti",
+            "吹箫": "xiao",
+            "西域琴": "xiyu",
+        }
+        directory = self.resources / "tanqin" / instrument_dirs.get(instrument, "gangqin")
+        parsed, error = self._parse_piano_notation(notation, directory)
+        if error:
+            return None, error
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None, "未找到 FFmpeg，无法合成音频。请先安装 FFmpeg 并加入系统 PATH。"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        filters = []
+        labels = []
+        elapsed = 0.0
+        for index, (note_path, duration) in enumerate(parsed):
+            filters.append(f"[{index}:a]adelay={round(elapsed)}:all=1[a{index}]")
+            labels.append(f"[a{index}]")
+            elapsed += duration
+        filters.append(
+            f"{''.join(labels)}amix=inputs={len(parsed)}:dropout_transition=0:normalize=0[a]"
+        )
+        command = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4"]
+        for note_path, _ in parsed:
+            command.extend(["-i", str(note_path)])
+        command.extend([
+            "-filter_complex", ";".join(filters),
+            "-map", "[a]", "-codec:a", "libmp3lame", str(output_path),
+        ])
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=max(30, elapsed / 1000 + 20)
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return None, "音频合成超时，请缩短曲谱后重试。"
+        except OSError as error:
+            return None, f"启动 FFmpeg 失败：{error}"
+        if process.returncode != 0 or not output_path.is_file():
+            detail = stderr.decode("utf-8", errors="ignore").strip() if stderr else "未知错误"
+            return None, f"音频合成失败：{detail}"
+        return output_path, None
+
+    @staticmethod
+    def _parse_piano_notation(
+        notation: str,
+        directory: Path,
+    ) -> tuple[list[tuple[Path, float]], str | None]:
+        score, _, tempo_text = notation.partition("|")
+        tempo = 100
+        if tempo_text.strip():
+            try:
+                tempo = int(tempo_text.strip())
+            except ValueError:
+                return [], "速度必须是数字，例如：|100。"
+            if not 30 <= tempo <= 300:
+                return [], "速度范围为 30 到 300。"
+        tokens = score.replace("，", " ").replace(",", " ").split()
+        if not tokens:
+            return [], "请输入音符，例如：/钢琴 1 2 3 1。"
+        if len(tokens) > 128:
+            return [], "一次最多演奏 128 个音符。"
+
+        result = []
+        beat = 60000 / tempo
+        for token in tokens:
+            match = re.fullmatch(r"(\+{0,2}|-)?[0-7](_{0,3})", token)
+            if not match:
+                return [], f"无法识别音符：{token}。请使用 -7 到 +7，并用下划线表示短音。"
+            note = token.replace("_", "")
+            path = directory / f"{note}.mp3"
+            if not path.is_file():
+                return [], f"音色资源缺失：{note}.mp3。"
+            duration = beat * ({0: 1, 1: 0.5, 2: 0.25, 3: 0.125}[len(match.group(2))])
+            result.append((path, duration))
+        return result, None
 
     def character_image(self, character: str) -> Path | None:
         name = character.strip().replace("/", "").replace("\\", "")

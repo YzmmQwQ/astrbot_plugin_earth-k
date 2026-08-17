@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
@@ -28,12 +29,14 @@ class EarthKPlugin(Star):
         self.plugin_dir = Path(__file__).parent
         self.service = EarthService(self.plugin_dir)
         self.renderer: EarthRenderer | None = None
+        self.data_dir: Path | None = None
         self._divination_waiting: set[str] = set()
         self._memory_games: dict[str, dict[str, object]] = {}
         self._memory_scores: dict[tuple[str, str], int] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
+        self.data_dir = data_dir
         self.renderer = EarthRenderer(data_dir / "renders")
         try:
             await self.renderer.start()
@@ -125,6 +128,33 @@ class EarthKPlugin(Star):
     async def piano_help(self, event: AstrMessageEvent):
         event.stop_event()
         yield event.plain_result(self.service.piano_help_text())
+
+    @filter.command("钢琴")
+    @filter.command("八音盒")
+    @filter.command("古筝")
+    @filter.command("吉他")
+    @filter.command("萨克斯")
+    @filter.command("小提琴")
+    @filter.command("吹箫")
+    @filter.command("西域琴")
+    async def piano_play(self, event: AstrMessageEvent, notation: str = ""):
+        event.stop_event()
+        raw = event.get_message_str().lstrip()
+        instrument = next(
+            (name for name in ("钢琴", "八音盒", "古筝", "吉他", "萨克斯", "小提琴", "吹箫", "西域琴")
+             if raw.startswith(f"/{name}")),
+            "钢琴",
+        )
+        output_dir = self.data_dir or Path(StarTools.get_data_dir(self.name))
+        output = output_dir / "audio" / f"earth-k-{uuid4().hex}.mp3"
+        result, error = await self.service.play_piano(instrument, notation, output)
+        if error:
+            yield event.plain_result(error)
+            return
+        yield event.chain_result([
+            Comp.Plain(text=f"{instrument}演奏完成"),
+            Comp.Record.fromFileSystem(str(result)),
+        ])
 
     @filter.command("土块表情列表")
     async def meme_list(self, event: AstrMessageEvent):
