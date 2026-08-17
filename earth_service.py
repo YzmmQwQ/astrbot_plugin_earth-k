@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import hashlib
+import html
+import os
+import platform
 import random
+import shutil
+import sys
+import time
 from datetime import date
 from pathlib import Path
 
 import aiohttp
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - requirements installs psutil in AstrBot
+    psutil = None
 
 from .earth_renderer import EarthRenderer
 
@@ -19,6 +30,7 @@ HELP_GROUPS = [
             ("/今日运势", "查看今日运势"),
             ("/了解 <角色>", "发送本地角色资料图"),
             ("/大话骰规则", "发送大话骰规则图"),
+            ("/土块状态", "查看 AstrBot 宿主进程和系统状态图"),
             ("/土块版本", "查看迁移版本"),
             ("/土块渲染测试", "管理员私聊测试本地 HTML 渲染"),
             ("/土块更新", "管理员调用 AstrBot 官方插件更新器"),
@@ -78,6 +90,173 @@ class EarthService:
     def dice_rules_image(self) -> Path | None:
         image = self.resources / "img" / "骰子规则.jpg"
         return image if image.is_file() else None
+
+    def state_html(self) -> str:
+        """Build the original status layout from AstrBot host metrics."""
+        state_dir = self.resources / "html" / "state"
+        css_path = state_dir / "lyr.css"
+        renderer = EarthRenderer(Path("."))
+        css = renderer.inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        background = self._asset_uri(self.resources / "help" / "theme" / "default" / "bg.jpg")
+        icon_dir = state_dir / "zt"
+
+        def icon(name: str) -> str:
+            return self._asset_uri(icon_dir / name)
+
+        def text(value: object) -> str:
+            return html.escape(str(value))
+
+        metrics = self._host_metrics()
+        visual = metrics["visual"]
+        bot = metrics["bot"]
+        stat_rows = "".join(
+            f'''<td class="biaoge"><img src="{icon(name)}" class="bgtu"><br>{text(value)}</td>'''
+            for name, value in (
+                ("收.png", bot["received"]),
+                ("发.png", bot["sent"]),
+                ("图片.png", "AstrBot"),
+                ("人.png", "当前会话"),
+                ("人群.png", "当前会话"),
+            )
+        )
+        visual_cells = "".join(
+            f'''<td class="biaoge3"><img src="{icon(item["icon"])}" class="bgtu3"><br>
+<a class="bfb">{text(item["inner"])}</a><br><br>{text(item["info"][0])}<br>
+{text(item["info"][1])}<br>{text(item["info"][2])}</td>'''
+            for item in visual
+        )
+        disks = "".join(
+            f'''<div class="HardDisk_li"><div class="progress">
+<div class="word">{text(item["mount"])}   {text(item["use"])}%    {text(item["used"])} / {text(item["size"])}</div>
+<div class="current" style="width:{item["use"]}%;background:{item["color"]}"></div>
+</div></div>'''
+            for item in metrics["disks"]
+        )
+        other_rows = "".join(
+            f'<tr><td><div class="biao1">{text(first)}</div></td>'
+            f'<td><div class="biao2">{text(last)}</div></td></tr>'
+            for first, last in metrics["other"]
+        )
+        host_rows = "".join(f'<tr><td><div class="biao3">{text(row)}</div></td></tr>' for row in metrics["host"])
+        bot_name = text(bot["name"])
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+body {{ background-image:url("{background}"); }}
+.state-avatar {{ object-fit:contain; background:rgba(255,255,255,.12); padding:22px; }}
+</style></head><body><div class="box"><br>
+<div class="nbox"><div class="zt1"><img class="zt state-avatar" src="{icon("机器人_o.png")}" width="200" height="200"></div>
+<h1 class="name">{bot_name}</h1>
+<div class="zhuangtai"><img src="{icon("状态.png")}" class="ztd">- AstrBot Python 插件</div>
+<table class="bg"><tbody><tr>{stat_rows}</tr></tbody></table></div>
+<div class="nbox"><table class="bg2"><tbody>
+<tr><th class="biaoge2"><img src="{icon("机器人_o.png")}" class="bgtu2"></th><td class="biaoge2">{text(bot["platform"])}</td></tr>
+<tr><th class="biaoge2"><img src="{icon("电脑.png")}" class="bgtu2"></th><td class="biaoge2">{text(metrics["uptime"])}</td></tr>
+<tr><th class="biaoge2"><img src="{icon("设置.png")}" class="bgtu2"></th><td class="biaoge2">{text(metrics["runtime"])}</td></tr>
+<tr><th class="biaoge2"></th><td class="biaoge22">{text(metrics["time"])}</td></tr>
+</tbody></table><table class="bg3"><tbody><tr>{visual_cells}</tr></tbody></table></div>
+<div class="nbox2"><div class="memory"><ul>{disks}</ul></div></div>
+<div class="nbox"><table class="bg4">{other_rows}</table></div>
+<div class="nbox"><table class="bg4">{host_rows}</table></div>
+</div><br></body></html>'''
+
+    def _host_metrics(self) -> dict[str, object]:
+        now = time.time()
+        if psutil is None:
+            return self._fallback_metrics(now)
+
+        cpu = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+        process = psutil.Process(os.getpid())
+        process_memory = process.memory_info().rss
+        disks = []
+        seen: set[tuple[int, int]] = set()
+        for partition in psutil.disk_partitions(all=False):
+            try:
+                usage = psutil.disk_usage(partition.mountpoint)
+            except (OSError, PermissionError):
+                continue
+            key = (usage.total, usage.used)
+            if key in seen or not usage.total:
+                continue
+            seen.add(key)
+            percent = round(usage.percent)
+            color = "var(--low-color)" if percent < 70 else "var(--medium-color)" if percent < 90 else "var(--high-color)"
+            disks.append({
+                "mount": partition.mountpoint,
+                "use": percent,
+                "used": self._file_size(usage.used),
+                "size": self._file_size(usage.total),
+                "color": color,
+            })
+
+        network = psutil.net_io_counters(pernic=True)
+        active = [(name, item) for name, item in network.items() if not name.lower().startswith(("lo", "loopback"))]
+        active.sort(key=lambda pair: pair[1].bytes_sent + pair[1].bytes_recv, reverse=True)
+        if active:
+            interface, counter = active[0]
+            network_text = f"{interface} ↑{self._file_size(counter.bytes_sent, False, False)} | ↓{self._file_size(counter.bytes_recv, False, False)}"
+        else:
+            network_text = "无可用网络接口"
+
+        plugin_root = self.plugin_dir.parent
+        plugin_count = sum(1 for item in plugin_root.iterdir() if item.is_dir()) if plugin_root.is_dir() else 1
+        return {
+            "bot": {
+                "name": "AstrBot",
+                "platform": f"AstrBot Python {platform.python_version()}",
+                "received": "当前进程",
+                "sent": f"{plugin_count} plugins",
+            },
+            "uptime": f"系统运行 {self._duration(now - psutil.boot_time())}",
+            "runtime": f"AstrBot 进程 {self._duration(process.create_time() and now - process.create_time())}",
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+            "visual": [
+                {"icon": "CPU.png", "inner": f"{round(cpu)}%", "info": [f"{platform.processor() or '未知 CPU'} {psutil.cpu_count() or 0}核", f"系统 {platform.system()} {platform.release()}", f"负载 {round(cpu, 1)}%"]},
+                {"icon": "内存.png", "inner": f"{round(memory.percent)}%", "info": [f"总共 {self._file_size(memory.total)}", f"已用 {self._file_size(memory.used)}", f"空闲 {self._file_size(memory.available)}"]},
+                {"icon": "设置.png", "inner": f"{self._file_size(process_memory, False, False)}", "info": ["当前插件进程", f"Python {platform.python_version()}", f"PID {process.pid}"]},
+            ],
+            "disks": disks,
+            "other": [("系统", platform.platform()), ("网络", network_text), ("插件", f"{plugin_count} 个 AstrBot 插件")],
+            "host": [f"运行目录：{self.plugin_dir.parent}", f"解释器：{sys.executable}", "旧版 Yunzai Redis/Bot 数据：AstrBot 不提供，已移除"],
+        }
+
+    def _fallback_metrics(self, now: float) -> dict[str, object]:
+        return {
+            "bot": {"name": "AstrBot", "platform": "AstrBot Python", "received": "未知", "sent": "未知"},
+            "uptime": "系统运行时间不可用", "runtime": "AstrBot 进程运行时间不可用",
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+            "visual": [
+                {"icon": "CPU.png", "inner": "未知", "info": ["psutil 未安装", "请安装 requirements.txt", ""]},
+                {"icon": "内存.png", "inner": "未知", "info": ["psutil 未安装", "请安装 requirements.txt", ""]},
+                {"icon": "设置.png", "inner": "未知", "info": ["AstrBot 进程", "Python", ""]},
+            ], "disks": [], "other": [("系统", platform.platform()), ("网络", "未知")], "host": [],
+        }
+
+    @staticmethod
+    def _duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        days, seconds = divmod(seconds, 86400)
+        hours, seconds = divmod(seconds, 3600)
+        minutes, seconds = divmod(seconds, 60)
+        return f"{days}天{hours:02d}小时{minutes:02d}分{seconds:02d}秒"
+
+    @staticmethod
+    def _file_size(size: int | float, is_byte: bool = True, suffix: bool = True) -> str:
+        if size is None:
+            return "0"
+        units = ["B", "Kb", "Mb", "Gb", "Tb"]
+        value = float(size)
+        index = 0
+        while value >= 1024 and index < len(units) - 1:
+            value /= 1024
+            index += 1
+        if not is_byte and index == 0:
+            return f"{value:.2f}"
+        return f"{value:.2f}{units[index] if suffix else units[index].replace('b', '')}"
+
+    @staticmethod
+    def _asset_uri(path: Path) -> str:
+        return EarthRenderer(Path(".")).inline_file(path) if path.is_file() else ""
 
     async def daily_fortune(self, user_id: str) -> dict[str, str]:
         """Fetch the old service when available, with a deterministic local fallback."""

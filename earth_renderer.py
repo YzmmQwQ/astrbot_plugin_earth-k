@@ -46,7 +46,12 @@ class EarthRenderer:
         self._browser = None
         self._playwright = None
 
-    async def render(self, html: str, data: dict[str, Any] | None = None) -> str:
+    async def render(
+        self,
+        html: str,
+        data: dict[str, Any] | None = None,
+        viewport_width: int = 860,
+    ) -> str:
         await self.start()
         if not self._context:
             raise RuntimeError("本地 Playwright 渲染器未启动")
@@ -60,7 +65,9 @@ class EarthRenderer:
                 height = await page.evaluate(
                     "Math.ceil(Math.max(document.body.scrollHeight, document.documentElement.scrollHeight))"
                 )
-                await page.set_viewport_size({"width": 860, "height": max(1, int(height))})
+                await page.set_viewport_size(
+                    {"width": viewport_width, "height": max(1, int(height))}
+                )
                 await page.screenshot(path=str(output), full_page=True)
             finally:
                 await page.close()
@@ -83,4 +90,3 @@ class EarthRenderer:
             return f"url('{self.inline_file(asset)}')"
 
         return re.sub(r"url\(([^)]+)\)", replace, css)
-

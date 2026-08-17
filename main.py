@@ -121,6 +121,19 @@ class EarthKPlugin(Star):
             return
         yield event.image_result(str(image))
 
+    @filter.command("土块状态")
+    async def state(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not self.renderer:
+            yield event.plain_result("本地 HTML 渲染器未启动")
+            return
+        try:
+            html = await asyncio.to_thread(self.service.state_html)
+            yield event.image_result(await self.renderer.render(html, viewport_width=1200))
+        except Exception as error:
+            logger.exception("Earth-K 状态页渲染失败")
+            yield event.plain_result(f"状态页渲染失败：{error}")
+
     @filter.command("卜卦")
     async def divination(self, event: AstrMessageEvent):
         event.stop_event()
