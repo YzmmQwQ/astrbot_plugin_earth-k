@@ -1,0 +1,6 @@
+name: astrbot_plugin_earth_k
+display_name: Earth-K
+desc: Earth-K Yunzai 插件的 AstrBot 原生迁移版
+version: v0.1.0
+author: Yzmm
+repo: https://github.com/YzmmQwQ/astrbot_plugin_earth-k
