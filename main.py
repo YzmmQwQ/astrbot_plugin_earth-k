@@ -87,6 +87,22 @@ class EarthKPlugin(Star):
         event.stop_event()
         yield event.plain_result(self.service.version_text())
 
+    @filter.command("今日运势")
+    async def fortune(self, event: AstrMessageEvent):
+        event.stop_event()
+        try:
+            result = await self.service.daily_fortune(str(event.get_sender_id()))
+            yield event.plain_result(
+                f"今日运势：{result['summary']}\n"
+                f"星级：{result['star']}\n"
+                f"点评：{result['review']}\n"
+                f"解读：{result['detail']}\n"
+                f"来源：{result['source']}"
+            )
+        except Exception as error:
+            logger.exception("Earth-K 运势查询失败")
+            yield event.plain_result(f"运势查询失败：{error}")
+
     @filter.command("卜卦")
     async def divination(self, event: AstrMessageEvent):
         event.stop_event()

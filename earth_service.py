@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import random
+from datetime import date
 from pathlib import Path
+
+import aiohttp
 
 from .earth_renderer import EarthRenderer
 
@@ -12,6 +16,7 @@ HELP_GROUPS = [
         [
             ("/卜卦", "周易占卜，每日一卦"),
             ("/练习记忆力", "观察数字卡后，用 /我猜 <字母> 作答"),
+            ("/今日运势", "查看今日运势"),
             ("/土块版本", "查看迁移版本"),
             ("/土块渲染测试", "管理员私聊测试本地 HTML 渲染"),
             ("/土块更新", "管理员调用 AstrBot 官方插件更新器"),
@@ -60,6 +65,37 @@ class EarthService:
                     version = line.lstrip("# ").strip()
                     break
         return f"Earth-K AstrBot 迁移版\n当前版本：{version}\n迁移状态：基础框架与本地 HTML 渲染已完成"
+
+    async def daily_fortune(self, user_id: str) -> dict[str, str]:
+        """Fetch the old service when available, with a deterministic local fallback."""
+        url = f"https://api.fanlisky.cn/api/qr-fortune/get/{user_id}"
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        payload = await response.json(content_type=None)
+                        data = payload.get("data") or payload
+                        if isinstance(data, dict) and data.get("fortuneSummary"):
+                            return {
+                                "summary": str(data.get("fortuneSummary", "平稳")),
+                                "star": str(data.get("luckyStar", "三星")),
+                                "review": str(data.get("signText", "保持平常心，稳步前进。")),
+                                "detail": str(data.get("unSignText", "今日宜脚踏实地，忌急于求成。")),
+                                "source": "在线运势服务",
+                            }
+        except Exception:
+            pass
+
+        options = [
+            ("大吉", "五星", "今日状态上佳，适合推进重要计划。", "把握机会，也记得给自己留出休息时间。"),
+            ("小吉", "四星", "小事顺利，积累会带来不错的结果。", "先完成最重要的一件事，再处理其他安排。"),
+            ("平稳", "三星", "平稳度日，耐心会比速度更有价值。", "避免冲动决定，按自己的节奏完成今天的事。"),
+            ("待时", "二星", "今天适合整理和准备，不必强求立刻见效。", "把基础工作做好，合适的时机自然会出现。"),
+        ]
+        seed = hashlib.sha256(f"{date.today().isoformat()}:{user_id}".encode()).digest()
+        summary, star, review, detail = options[int.from_bytes(seed[:2], "big") % len(options)]
+        return {"summary": summary, "star": star, "review": review, "detail": detail, "source": "本地备用结果"}
 
     def help_html(self) -> str:
         groups = []
