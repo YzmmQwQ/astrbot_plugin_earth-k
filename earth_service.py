@@ -14,6 +14,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
+from urllib.parse import quote
 
 import aiohttp
 
@@ -88,6 +89,9 @@ HELP_GROUPS = [
             ("/角色视频 <编号>", "播放指定的原神角色视频"),
             ("/过场动画列表", "查看原神过场动画目录"),
             ("/过场动画 <编号>", "播放指定的原神过场动画"),
+            ("/魔法目录", "查看本地绘图标签目录"),
+            ("/目录 <名称或编号>", "查看指定绘图标签内容"),
+            ("/预览图 <名称>", "查看指定标签的预览图"),
             ("/原史 <名称>", "查询原神角色、武器、圣遗物等资料"),
             ("/原史目录 <分类>", "查看原神资料分类目录"),
             ("/猜原神", "开始一轮本地题库猜原神"),
@@ -220,6 +224,62 @@ class EarthService:
                     version = line.lstrip("# ").strip()
                     break
         return f"Earth-K AstrBot 迁移版\n当前版本：{version}\n迁移状态：基础框架与本地 HTML 渲染已完成"
+
+    def tag_catalog(self) -> list[str]:
+        directory = self.resources / "tag" / "ms"
+        return sorted(path.stem for path in directory.glob("*.txt"))
+
+    def tag_entries(self, name_or_index: str) -> tuple[str, list[str]]:
+        names = self.tag_catalog()
+        value = name_or_index.strip()
+        if value.isdigit():
+            index = int(value) - 1
+            if not 0 <= index < len(names):
+                raise ValueError(f"目录编号范围为 1-{len(names)}")
+            name = names[index]
+        else:
+            name = value
+            if name not in names:
+                raise ValueError("没有找到该目录名称")
+        path = self.resources / "tag" / "ms" / f"{name}.txt"
+        entries = [line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+        if not entries:
+            raise RuntimeError("该目录为空")
+        return name, entries
+
+    def tag_catalog_html(self, names: list[str]) -> str:
+        css_path = self.resources / "tag" / "index.css"
+        css = EarthRenderer(Path(".")).inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        items = "".join(
+            f'<div class="tag-item"><span class="tag-index">{index}</span>{html.escape(name)}</div>'
+            for index, name in enumerate(names, 1)
+        )
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+.tag-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; width: 900px; margin: 0 auto; }}
+.tag-item {{ padding: 12px 18px; border-bottom: 1px solid rgba(0,0,0,.15); font-family: "jty"; font-size: 24px; }}
+.tag-index {{ display: inline-block; min-width: 58px; color: #fff; margin-right: 10px; }}
+</style></head><body><div class="bt">魔 法 目 录</div>
+<p class="nr">以下为本地绘图标签目录，可发送 /目录 &lt;名称或编号&gt; 查看内容</p>
+<div class="tag-grid">{items}</div>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p></body></html>'''
+
+    def tag_entries_html(self, name: str, entries: list[str]) -> str:
+        css_path = self.resources / "tag" / "index.css"
+        css = EarthRenderer(Path(".")).inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        items = "".join(f'<div class="nei">{html.escape(entry)}</div>' for entry in entries)
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+.tag-content {{ width: 900px; margin: 0 auto; }}
+.nei {{ word-break: break-word; }}
+</style></head><body><div class="bt">{html.escape(name)}</div>
+<p class="nr">发送 /预览图 {html.escape(name)} 查看该标签预览</p>
+<div class="tag-content">{items}</div>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p></body></html>'''
+
+    @staticmethod
+    def tag_preview_url(name: str) -> str:
+        return f"https://tukuai.ddns.net:1450/preview/{quote(name)}.jpg"
 
     def random_iq_question(self) -> str:
         if not self._iq_questions:

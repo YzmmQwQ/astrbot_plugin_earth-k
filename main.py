@@ -867,6 +867,56 @@ class EarthKPlugin(Star):
             if current_task is asyncio.current_task():
                 self._station_timeout_tasks.pop(session, None)
 
+    @filter.command("魔法目录")
+    async def tag_catalog_command(self, event: AstrMessageEvent):
+        event.stop_event()
+        names = self.service.tag_catalog()
+        if not names:
+            yield event.plain_result("本地魔法目录为空。")
+            return
+        if not self.renderer:
+            yield event.plain_result("本地 HTML 渲染器未启动")
+            return
+        try:
+            page = self.service.tag_catalog_html(names)
+            yield event.image_result(await self.renderer.render(page, viewport_width=1100))
+        except Exception as error:
+            logger.exception("Earth-K 魔法目录渲染失败")
+            yield event.plain_result(f"魔法目录渲染失败：{error}")
+
+    @filter.command("目录")
+    async def tag_entries_command(self, event: AstrMessageEvent, name: GreedyStr = ""):
+        event.stop_event()
+        name = str(name).strip()
+        if not name:
+            yield event.plain_result("用法：/目录 <名称或编号>，例如 /目录 人物")
+            return
+        try:
+            title, entries = self.service.tag_entries(name)
+            if not self.renderer:
+                yield event.plain_result(f"{title}\n" + "\n".join(entries))
+                return
+            page = self.service.tag_entries_html(title, entries)
+            yield event.image_result(await self.renderer.render(page, viewport_width=1100))
+        except Exception as error:
+            logger.exception("Earth-K 魔法标签查询失败")
+            yield event.plain_result(f"魔法目录查询失败：{error}")
+
+    @filter.command("预览图")
+    async def tag_preview(self, event: AstrMessageEvent, name: GreedyStr = ""):
+        event.stop_event()
+        name = str(name).strip()
+        if not name:
+            yield event.plain_result("用法：/预览图 <标签名称>")
+            return
+        if name not in self.service.tag_catalog():
+            yield event.plain_result("没有找到该标签，请先发送 /魔法目录 查看可用名称。")
+            return
+        yield event.chain_result([
+            Comp.Plain(text=f"{name}预览图："),
+            Comp.Image.fromURL(self.service.tag_preview_url(name)),
+        ])
+
     @filter.command("了解")
     async def character_info(self, event: AstrMessageEvent, character: str = ""):
         event.stop_event()
