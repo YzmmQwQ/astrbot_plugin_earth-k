@@ -1,6 +1,6 @@
 # Earth-K AstrBot 迁移版
 
-这是 Earth-K-Plugin 的 AstrBot 原生迁移版本。命令统一使用 AstrBot 的 `/` 触发方式，不再使用 Yunzai 的 `#` 规则。
+这是 [Earth-K-Plugin](https://github.com/SmallK111407/earth-k-plugin) 的 AstrBot 原生迁移版本。命令统一使用 AstrBot 的 `/` 触发方式，不再使用 Yunzai 的 `#` 规则。
 
 ## 当前可用命令
 
