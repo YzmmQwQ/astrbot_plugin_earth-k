@@ -113,6 +113,16 @@ class EarthKPlugin(Star):
             logger.exception("Earth-K 运势查询失败")
             yield event.plain_result(f"运势查询失败：{error}")
 
+    @filter.command("测试智商")
+    async def iq_test(self, event: AstrMessageEvent):
+        event.stop_event()
+        try:
+            question = self.service.random_iq_question()
+            yield event.plain_result(f"想测试自己是不是笨比吗？\n\n{question}")
+        except Exception as error:
+            logger.exception("Earth-K 智商题获取失败")
+            yield event.plain_result(f"智商题获取失败：{error}")
+
     @filter.command("了解")
     async def character_info(self, event: AstrMessageEvent, character: str = ""):
         event.stop_event()

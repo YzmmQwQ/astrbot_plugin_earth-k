@@ -51,6 +51,7 @@ HELP_GROUPS = [
             ("/卜卦", "周易占卜，每日一卦"),
             ("/练习记忆力", "观察数字卡后，用 /我猜 <字母> 作答"),
             ("/今日运势", "查看今日运势"),
+            ("/测试智商", "随机发送一题本地脑筋急转弯"),
             ("/了解 <角色>", "发送本地角色资料图"),
             ("/角色语音汇总", "查看可用的原神角色语音"),
             ("/语音 <角色> [编号]", "播放角色中文语音"),
@@ -121,6 +122,7 @@ class EarthService:
         self._genshin_catalog: list[dict[str, object]] = []
         self._genshin_catalog_at = 0.0
         self._guess_aliases: dict[str, list[str]] = {}
+        self._iq_questions: list[str] = []
         meme_file = self.resources / "bq.json"
         if meme_file.is_file():
             try:
@@ -130,6 +132,19 @@ class EarthService:
                         continue
                     for keyword in item.get("keywords", []):
                         self._meme_keywords[str(keyword)] = item
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        iq_file = self.resources / "json" / "iq_test" / "questions.json"
+        if iq_file.is_file():
+            try:
+                questions = json.loads(iq_file.read_text(encoding="utf-8"))
+                if isinstance(questions, list):
+                    self._iq_questions = [
+                        str(question).strip()
+                        for question in questions
+                        if str(question).strip()
+                    ]
             except (OSError, json.JSONDecodeError):
                 pass
         guess_alias_file = self.resources / "json" / "mohu" / "mohu.json"
@@ -154,6 +169,11 @@ class EarthService:
                     version = line.lstrip("# ").strip()
                     break
         return f"Earth-K AstrBot 迁移版\n当前版本：{version}\n迁移状态：基础框架与本地 HTML 渲染已完成"
+
+    def random_iq_question(self) -> str:
+        if not self._iq_questions:
+            raise RuntimeError("智商题库为空")
+        return random.choice(self._iq_questions)
 
     @staticmethod
     def _guess_normalize(value: str) -> str:
