@@ -92,6 +92,12 @@ HELP_GROUPS = [
             ("/魔法目录", "查看本地绘图标签目录"),
             ("/目录 <名称或编号>", "查看指定绘图标签内容"),
             ("/预览图 <名称>", "查看指定标签的预览图"),
+            ("/娶群友", "随机选择一名群友成为对象"),
+            ("/强娶 <用户ID>", "指定一名群友成为对象"),
+            ("/抢群友 <用户ID>", "尝试抢走其他人的对象"),
+            ("/我对象呢", "查看今天的群对象"),
+            ("/闹离婚", "解除今天的群对象关系"),
+            ("/群对象列表", "查看当前群的对象列表"),
             ("/原史 <名称>", "查询原神角色、武器、圣遗物等资料"),
             ("/原史目录 <分类>", "查看原神资料分类目录"),
             ("/猜原神", "开始一轮本地题库猜原神"),
@@ -279,6 +285,24 @@ class EarthService:
     @staticmethod
     def tag_preview_url(name: str) -> str:
         return f"https://tukuai.ddns.net:1450/preview/{quote(name)}.jpg"
+
+    def marry_list_html(self, pairs: list[dict[str, str]]) -> str:
+        css_path = self.resources / "html" / "Marry" / "gs.css"
+        css = EarthRenderer(Path(".")).inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        rows = "".join(
+            f'<div class="marry-row"><span>{html.escape(pair["man_name"])}'
+            f'（{html.escape(pair["man"])}）</span><b>♥</b><span>'
+            f'{html.escape(pair["woman_name"])}（{html.escape(pair["woman"])}）</span></div>'
+            for pair in pairs
+        )
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+.marry-list {{ width: 900px; margin: 0 auto; }}
+.marry-row {{ display: flex; align-items: center; justify-content: center; gap: 24px; padding: 18px; color: #fff; font: 24px "jty"; border-bottom: 1px solid rgba(255,255,255,.2); }}
+.marry-row b {{ color: #e45b64; font-size: 32px; }}
+</style></head><body><div class="kqtp">群 对 象 列 表</div>
+<div class="marry-list">{rows or '<div class="lb">当前还没有对象关系。</div>'}</div>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p></body></html>'''
 
     def random_iq_question(self) -> str:
         if not self._iq_questions:

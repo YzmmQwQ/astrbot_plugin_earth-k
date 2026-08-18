@@ -47,6 +47,7 @@ class EarthKPlugin(Star):
         self._story_games: dict[str, dict[str, object]] = {}
         self._station_games: dict[str, dict[str, object]] = {}
         self._station_timeout_tasks: dict[str, asyncio.Task[None]] = {}
+        self._marry_games: dict[str, list[dict[str, str]]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -70,6 +71,7 @@ class EarthKPlugin(Star):
             task.cancel()
         self._station_timeout_tasks.clear()
         self._station_games.clear()
+        self._marry_games.clear()
         if self.renderer:
             await self.renderer.stop()
 
@@ -866,6 +868,175 @@ class EarthKPlugin(Star):
             current_task = self._station_timeout_tasks.get(session)
             if current_task is asyncio.current_task():
                 self._station_timeout_tasks.pop(session, None)
+
+    @filter.command("娶群友")
+    async def marry_random(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("娶群友只能在群里进行")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._marry_games.setdefault(session, [])
+        user_id = str(event.get_sender_id())
+        if self._marry_find(game, user_id):
+            yield event.plain_result("你今天已经有对象了，别三心二意。")
+            return
+        if random.randrange(100) < 30:
+            yield event.plain_result("真可惜，娶对象失败了，嘤嘤嘤。")
+            return
+        try:
+            candidates = await self._marry_members(event, game, user_id)
+        except Exception as error:
+            logger.exception("Earth-K 群成员获取失败")
+            yield event.plain_result(f"暂时获取不到群成员：{error}")
+            return
+        if not candidates:
+            yield event.plain_result("当前没有可配对的群友。")
+            return
+        target_id, target_name = random.choice(candidates)
+        pair = {"man": user_id, "man_name": event.get_sender_name() or user_id,
+                "woman": target_id, "woman_name": target_name}
+        game.append(pair)
+        yield event.chain_result([
+            Comp.At(qq=user_id),
+            Comp.Plain(text=f" 你今天的对象是 {target_name}（{target_id}），好好珍惜对方哦。"),
+        ])
+
+    @filter.command("强娶")
+    async def marry_force(self, event: AstrMessageEvent, target_id: str = ""):
+        event.stop_event()
+        async for result in self._marry_add_target(event, target_id.strip(), "强娶", steal=False):
+            yield result
+
+    @filter.command("抢群友")
+    async def marry_steal(self, event: AstrMessageEvent, target_id: str = ""):
+        event.stop_event()
+        async for result in self._marry_add_target(event, target_id.strip(), "抢群友", steal=True):
+            yield result
+
+    async def _marry_add_target(self, event: AstrMessageEvent, target_id: str, action: str, steal: bool):
+        if not event.get_group_id():
+            yield event.plain_result(f"{action}只能在群里进行")
+            return
+        if not target_id:
+            yield event.plain_result(f"用法：/{action} <用户ID>")
+            return
+        user_id = str(event.get_sender_id())
+        if target_id == user_id:
+            yield event.plain_result("不能和自己结婚。")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._marry_games.setdefault(session, [])
+        if self._marry_find(game, user_id):
+            yield event.plain_result("你今天已经有对象了。")
+            return
+        target_pair = self._marry_find(game, target_id)
+        if target_pair and not steal:
+            yield event.plain_result("对方今天已经被娶走了。")
+            return
+        if steal and not target_pair:
+            yield event.plain_result("对方还没有对象，直接使用 /强娶 <用户ID> 吧。")
+            return
+        if steal and random.randrange(100) >= 70:
+            yield event.plain_result("没抢着，欸嘿。")
+            return
+        try:
+            members = await self._marry_members(event, game, user_id, include_paired=True)
+        except Exception:
+            members = []
+        target_name = next((name for member_id, name in members if member_id == target_id), target_id)
+        if target_pair:
+            target_name = target_pair["man_name"] if target_pair["man"] == target_id else target_pair["woman_name"]
+            game.remove(target_pair)
+        game.append({"man": user_id, "man_name": event.get_sender_name() or user_id,
+                     "woman": target_id, "woman_name": target_name})
+        yield event.chain_result([
+            Comp.At(qq=user_id),
+            Comp.Plain(text=f" 成功{action}了 {target_name}（{target_id}）。"),
+        ])
+
+    @filter.command("我对象呢")
+    async def marry_current(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("这个命令只能在群里使用")
+            return
+        pair = self._marry_find(self._marry_games.get(str(event.unified_msg_origin), []), str(event.get_sender_id()))
+        if not pair:
+            yield event.plain_result("醒醒吧，你今天还没有对象。")
+            return
+        partner_id, partner_name = self._marry_partner(pair, str(event.get_sender_id()))
+        yield event.chain_result([
+            Comp.At(qq=str(event.get_sender_id())),
+            Comp.Plain(text=f" 你今天的对象是 {partner_name}（{partner_id}）。"),
+        ])
+
+    @filter.command("闹离婚")
+    async def marry_divorce(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("这个命令只能在群里使用")
+            return
+        game = self._marry_games.get(str(event.unified_msg_origin), [])
+        pair = self._marry_find(game, str(event.get_sender_id()))
+        if not pair:
+            yield event.plain_result("你连对象都没有，跟谁离婚呢。")
+            return
+        game.remove(pair)
+        yield event.plain_result("没想到你们走到了这一步，那就将来再会吧。")
+
+    @filter.command("群对象列表")
+    async def marry_list(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("群对象列表只能在群里查看")
+            return
+        pairs = self._marry_games.get(str(event.unified_msg_origin), [])
+        if not self.renderer:
+            yield event.plain_result("\n".join(f"{pair['man_name']} ♥ {pair['woman_name']}" for pair in pairs) or "当前还没有对象关系。")
+            return
+        try:
+            page = self.service.marry_list_html(pairs)
+            yield event.image_result(await self.renderer.render(page, viewport_width=1100))
+        except Exception as error:
+            logger.exception("Earth-K 群对象列表渲染失败")
+            yield event.plain_result(f"群对象列表渲染失败：{error}")
+
+    async def _marry_members(
+        self,
+        event: AstrMessageEvent,
+        game: list[dict[str, str]],
+        user_id: str,
+        include_paired: bool = False,
+    ) -> list[tuple[str, str]]:
+        group = await event.get_group()
+        raw_members = getattr(group, "members", None) if group else None
+        members = list(raw_members.values()) if isinstance(raw_members, dict) else list(raw_members or [])
+        paired_ids = {
+            user
+            for pair in game
+            for user in (pair["man"], pair["woman"])
+        }
+        self_id = str(event.get_self_id())
+        result = []
+        for member in members:
+            member_id = str(getattr(member, "user_id", ""))
+            if not member_id or member_id in {user_id, self_id}:
+                continue
+            if not include_paired and member_id in paired_ids:
+                continue
+            result.append((member_id, str(getattr(member, "nickname", "") or member_id)))
+        return result
+
+    @staticmethod
+    def _marry_find(game: list[dict[str, str]], user_id: str) -> dict[str, str] | None:
+        return next((pair for pair in game if pair["man"] == user_id or pair["woman"] == user_id), None)
+
+    @staticmethod
+    def _marry_partner(pair: dict[str, str], user_id: str) -> tuple[str, str]:
+        if pair["man"] == user_id:
+            return pair["woman"], pair["woman_name"]
+        return pair["man"], pair["man_name"]
 
     @filter.command("魔法目录")
     async def tag_catalog_command(self, event: AstrMessageEvent):
