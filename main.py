@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -33,6 +34,7 @@ class EarthKPlugin(Star):
         self._divination_waiting: set[str] = set()
         self._memory_games: dict[str, dict[str, object]] = {}
         self._memory_scores: dict[tuple[str, str], int] = {}
+        self._dice_games: dict[str, dict[str, object]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -123,6 +125,193 @@ class EarthKPlugin(Star):
             yield event.plain_result("大话骰规则图片缺失")
             return
         yield event.image_result(str(image))
+
+    @filter.command("发起大话骰")
+    async def dice_create(self, event: AstrMessageEvent):
+        event.stop_event()
+        if event.is_private_chat():
+            yield event.plain_result("请在群聊中发起大话骰。")
+            return
+        session = str(event.unified_msg_origin)
+        if session in self._dice_games:
+            yield event.plain_result("当前会话已经有一局大话骰。")
+            return
+        user_id = str(event.get_sender_id())
+        self._dice_games[session] = {
+            "host": user_id,
+            "players": {user_id: self._dice_name(event)},
+            "dice": {},
+            "started": False,
+            "turn": 0,
+            "bid": None,
+        }
+        yield event.plain_result("大话骰已发起，发送 /加入大话骰 加入，至少两人后由房主发送 /开始大话骰。")
+
+    @filter.command("加入大话骰")
+    async def dice_join(self, event: AstrMessageEvent):
+        event.stop_event()
+        if event.is_private_chat():
+            yield event.plain_result("请在发起游戏的群聊中加入大话骰。")
+            return
+        game = self._dice_games.get(str(event.unified_msg_origin))
+        if not game:
+            yield event.plain_result("当前会话还没有发起大话骰。")
+            return
+        if game["started"]:
+            yield event.plain_result("游戏已经开始，不能中途加入。")
+            return
+        players = game["players"]
+        user_id = str(event.get_sender_id())
+        if user_id in players:
+            yield event.plain_result("你已经加入这局游戏了。")
+            return
+        if len(players) >= 8:
+            yield event.plain_result("当前游戏最多支持 8 名玩家。")
+            return
+        players[user_id] = self._dice_name(event)
+        yield event.plain_result(f"{players[user_id]} 加入成功，当前 {len(players)} 人。")
+
+    @filter.command("开始大话骰")
+    async def dice_start(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        game = self._dice_games.get(session)
+        if not game:
+            yield event.plain_result("当前会话还没有发起大话骰。")
+            return
+        user_id = str(event.get_sender_id())
+        if user_id != game["host"]:
+            yield event.plain_result("只有房主可以开始游戏。")
+            return
+        players = game["players"]
+        if len(players) < 2:
+            yield event.plain_result("至少需要 2 名玩家。")
+            return
+        if game["started"]:
+            yield event.plain_result("游戏已经开始了。")
+            return
+        game["started"] = True
+        game["dice"] = {player: [random.randint(1, 6) for _ in range(5)] for player in players}
+        game["turn"] = 0
+        game["bid"] = None
+        first = list(players.values())[0]
+        yield event.plain_result(
+            "大话骰开始！每位玩家私聊机器人发送 /我的骰子 查看自己的骰子。\n"
+            f"当前轮到：{first}\n请发送 /叫骰 <数量> <点数>，例如 /叫骰 3 5。"
+        )
+
+    @filter.command("我的骰子")
+    async def dice_private(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.is_private_chat():
+            yield event.plain_result("为了避免泄露骰子，请私聊机器人发送 /我的骰子。")
+            return
+        user_id = str(event.get_sender_id())
+        matches = [game for game in self._dice_games.values() if game["started"] and user_id in game["players"]]
+        if not matches:
+            yield event.plain_result("你没有进行中的大话骰。")
+            return
+        if len(matches) > 1:
+            yield event.plain_result("你同时参加了多局游戏，请先结束其他游戏后再查看骰子。")
+            return
+        dice = matches[0]["dice"].get(user_id, [])
+        yield event.plain_result("你的骰子（仅私聊可见）：" + " ".join(map(str, dice)))
+
+    @filter.command("叫骰")
+    async def dice_bid(self, event: AstrMessageEvent, bid_text: str = ""):
+        event.stop_event()
+        game = self._dice_games.get(str(event.unified_msg_origin))
+        if not game or not game["started"]:
+            yield event.plain_result("当前会话没有进行中的大话骰。")
+            return
+        user_id = str(event.get_sender_id())
+        players = list(game["players"])
+        if user_id not in game["players"]:
+            yield event.plain_result("你还没有加入这局游戏。")
+            return
+        if players[game["turn"]] != user_id:
+            yield event.plain_result(f"还没轮到你，目前轮到：{game['players'][players[game['turn']]]}")
+            return
+        parts = bid_text.split()
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            yield event.plain_result("用法：/叫骰 <数量> <点数>，例如 /叫骰 3 5。")
+            return
+        count, face = map(int, parts)
+        total_dice = sum(len(values) for values in game["dice"].values())
+        if not 1 <= face <= 6 or not 1 <= count <= total_dice:
+            yield event.plain_result(f"数量范围为 1-{total_dice}，点数范围为 1-6。")
+            return
+        previous = game["bid"]
+        if previous and not (count > previous[0] or (count == previous[0] and face > previous[1])):
+            yield event.plain_result(f"叫骰必须大于上一口 {previous[0]} 个 {previous[1]}。")
+            return
+        game["bid"] = (count, face)
+        game["turn"] = (game["turn"] + 1) % len(players)
+        next_player = players[game["turn"]]
+        yield event.plain_result(
+            f"{game['players'][user_id]} 叫了 {count} 个 {face}，下一位：{game['players'][next_player]}。\n"
+            "下一位继续 /叫骰，或发送 /开蛊。"
+        )
+
+    @filter.command("开蛊")
+    async def dice_open(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        game = self._dice_games.get(session)
+        if not game or not game["started"]:
+            yield event.plain_result("当前会话没有进行中的大话骰。")
+            return
+        user_id = str(event.get_sender_id())
+        players = list(game["players"])
+        if user_id not in game["players"]:
+            yield event.plain_result("你还没有加入这局游戏。")
+            return
+        if players[game["turn"]] != user_id:
+            yield event.plain_result(f"还没轮到你，目前轮到：{game['players'][players[game['turn']]]}")
+            return
+        bid = game["bid"]
+        if not bid:
+            yield event.plain_result("还没有人叫骰。")
+            return
+        count, face = bid
+        actual = sum(values.count(face) for values in game["dice"].values())
+        bidder = players[(game["turn"] - 1) % len(players)]
+        loser = user_id if actual >= count else bidder
+        reveal = "；".join(f"{game['players'][player]}：{' '.join(map(str, game['dice'][player]))}" for player in players)
+        game["dice"][loser].pop()
+        remaining = len(game["dice"][loser])
+        if remaining == 0:
+            winner = next(player for player in players if player != loser and game["dice"][player])
+            self._dice_games.pop(session, None)
+            yield event.plain_result(
+                f"开蛊结果：{actual} 个 {face}。\n{reveal}\n"
+                f"{game['players'][loser]} 的骰子已清空，{game['players'][winner]} 获胜！"
+            )
+            return
+        game["turn"] = players.index(loser) % len(players)
+        game["bid"] = None
+        yield event.plain_result(
+            f"开蛊结果：{actual} 个 {face}。\n{reveal}\n"
+            f"{game['players'][loser]} 失去 1 颗骰子，剩余 {remaining} 颗。新一轮从 {game['players'][loser]} 开始。"
+        )
+
+    @filter.command("结束大话骰")
+    async def dice_end(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        game = self._dice_games.get(session)
+        if not game:
+            yield event.plain_result("当前会话没有进行中的大话骰。")
+            return
+        if str(event.get_sender_id()) != game["host"]:
+            yield event.plain_result("只有房主可以结束游戏。")
+            return
+        self._dice_games.pop(session, None)
+        yield event.plain_result("大话骰已结束。")
+
+    @staticmethod
+    def _dice_name(event: AstrMessageEvent) -> str:
+        return event.get_sender_name() or str(event.get_sender_id()) or "未知玩家"
 
     @filter.command("弹琴帮助")
     async def piano_help(self, event: AstrMessageEvent):
