@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import aiohttp
 
@@ -51,6 +51,9 @@ GENSHIN_VIDEO_HEADERS = {
 AFDIAN_API = "https://afdian.net/api/creator/get-sponsors"
 AFDIAN_USER_ID = "f2ae58dcb94f11ec9f6852540025c377"
 AFDIAN_HEADERS = {"User-Agent": "Mozilla/5.0 Earth-K AstrBot Plugin"}
+GAME_LIST_API = "https://www.yikm.net/nes"
+GAME_CATEGORIES = {"fc": 0, "街机": 9, "gba": 11}
+GAME_HEADERS = {"User-Agent": "Mozilla/5.0 Earth-K AstrBot Plugin"}
 
 
 HELP_GROUPS = [
@@ -122,6 +125,9 @@ HELP_GROUPS = [
             ("/结束大话骰", "房主结束游戏"),
             ("/土块发电榜、/发电榜", "查看发电排行"),
             ("/最近发电", "查看最近发电支持者"),
+            ("/点游戏 [fc|街机|gba]", "查看在线小游戏目录"),
+            ("/游戏下一页、/游戏上一页", "翻阅小游戏目录"),
+            ("/玩游戏 <编号>", "发送指定小游戏链接"),
             ("/土块状态", "查看 AstrBot 宿主进程和系统状态图"),
             ("/弹琴帮助", "查看音频演奏迁移说明"),
             ("/钢琴 <音符>", "使用本地音色演奏，其他乐器命令同理"),
@@ -537,6 +543,84 @@ class EarthService:
             "",
         )
         return {"name": name, "avatar": avatar}
+
+    def game_list_html(
+        self,
+        category: str,
+        page: int,
+        items: list[dict[str, str]],
+    ) -> str:
+        css_path = self.resources / "html" / "Game" / "dyx.css"
+        css = EarthRenderer(Path(".")).inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        font = self._asset_uri(self.resources / "html" / "Game" / "jty.OTF")
+        entries = []
+        for index, item in enumerate(items, 1):
+            image = html.escape(str(item.get("image") or ""), quote=True)
+            image_html = f'<img src="{image}" />' if image else '<div class="no-image">暂无封面</div>'
+            entries.append(
+                f'<div class="game-entry"><span class="nr2">{index}</span>'
+                f'<div class="tu">{image_html}<div class="nr">{html.escape(item["name"])}</div></div></div>'
+            )
+        category_name = {"fc": "FC", "街机": "街机", "gba": "GBA"}.get(category, category)
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+@font-face {{ font-family: "jty-local"; src: url("{font}"); }}
+.game-entry {{ position: relative; min-height: 220px; }}
+.no-image {{ width: 50%; margin: auto; padding: 80px 0; font-family: "jty-local"; font-size: 26px; color: #666; }}
+</style></head><body><div class="bt">游 戏 列 表</div>
+<p class="nr">{category_name} · 第 {page} 页；发送 /玩游戏 &lt;编号&gt; 选择游戏</p>
+<div class="zhu">{"".join(entries) or '<p class="nr">这一页没有找到游戏。</p>'}</div>
+<p class="nr">发送 /游戏下一页 或 /游戏上一页 翻页</p>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p></body></html>'''
+
+    async def game_catalog(self, category: str, page: int) -> list[dict[str, str]]:
+        category = category.strip().lower() if category.strip().lower() in GAME_CATEGORIES else category.strip()
+        if category not in GAME_CATEGORIES:
+            raise ValueError("游戏分类只能是 fc、街机或 gba")
+        page = max(1, int(page))
+        timeout = aiohttp.ClientTimeout(total=15)
+        try:
+            async with aiohttp.ClientSession(headers=GAME_HEADERS, timeout=timeout) as session:
+                async with session.get(
+                    GAME_LIST_API,
+                    params={"page": page, "tag": GAME_CATEGORIES[category], "e": 0},
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError(f"HTTP {response.status}")
+                    source = await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError, RuntimeError) as error:
+            raise RuntimeError(f"在线游戏目录获取失败：{error}") from error
+        items = self._parse_game_catalog(source, category)
+        if not items:
+            raise RuntimeError("在线游戏目录没有返回可用游戏")
+        return items
+
+    @staticmethod
+    def _parse_game_catalog(source: str, category: str) -> list[dict[str, str]]:
+        links = re.findall(r'href=["\'](/play[^"\']+)', source, flags=re.IGNORECASE)
+        names = [
+            html.unescape(unquote(value)).strip()
+            for value in re.findall(r'&t=([^&"\']+)', source, flags=re.IGNORECASE)
+        ]
+        if category == "fc":
+            raw_images = re.findall(r'&p=([^"\']+)', source, flags=re.IGNORECASE)
+            images = [f"https://img.1990i.com/{unquote(value)}" for value in raw_images]
+            if len(images) > len(links):
+                images = images[-len(links):]
+        else:
+            images = re.findall(r'img-raised["\']?\s+src=["\']([^"\']+)', source, flags=re.IGNORECASE)
+        unique_links = list(dict.fromkeys(links))
+        unique_names = list(dict.fromkeys(name for name in names if name))
+        entries = []
+        for index, link in enumerate(unique_links):
+            name = unique_names[index] if index < len(unique_names) else f"未命名游戏 {index + 1}"
+            image = images[index] if index < len(images) else ""
+            entries.append({
+                "name": name,
+                "image": image,
+                "url": f"https://www.yikm.net{link}" if link.startswith("/") else link,
+            })
+        return entries
 
     @staticmethod
     def _guess_normalize(value: str) -> str:

@@ -49,6 +49,7 @@ class EarthKPlugin(Star):
         self._station_games: dict[str, dict[str, object]] = {}
         self._station_timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._marry_games: dict[str, list[dict[str, str]]] = {}
+        self._game_sessions: dict[str, dict[str, object]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -74,6 +75,7 @@ class EarthKPlugin(Star):
         self._station_timeout_tasks.clear()
         self._station_games.clear()
         self._marry_games.clear()
+        self._game_sessions.clear()
         if self.renderer:
             await self.renderer.stop()
 
@@ -1886,6 +1888,97 @@ class EarthKPlugin(Star):
         except Exception as error:
             logger.exception("Earth-K 发电榜获取失败")
             yield event.plain_result(f"发电榜获取失败：{error}")
+
+    @filter.command("点游戏")
+    async def game_list(self, event: AstrMessageEvent, category: str = ""):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        selected = category.strip().lower()
+        if selected not in {"fc", "街机", "gba"}:
+            if selected:
+                yield event.plain_result("用法：/点游戏 [fc|街机|gba]")
+                return
+            selected = "fc"
+        async for result in self._game_catalog_result(event, session, selected, 1):
+            yield result
+
+    @filter.command("游戏下一页")
+    async def game_next_page(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        state = self._game_sessions.get(session)
+        if not state:
+            yield event.plain_result("请先发送 /点游戏 [fc|街机|gba] 查看游戏目录。")
+            return
+        async for result in self._game_catalog_result(
+            event, session, str(state["category"]), int(state["page"]) + 1
+        ):
+            yield result
+
+    @filter.command("游戏上一页")
+    async def game_previous_page(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        state = self._game_sessions.get(session)
+        if not state:
+            yield event.plain_result("请先发送 /点游戏 [fc|街机|gba] 查看游戏目录。")
+            return
+        page = max(1, int(state["page"]) - 1)
+        async for result in self._game_catalog_result(
+            event, session, str(state["category"]), page
+        ):
+            yield result
+
+    @filter.command("玩游戏")
+    async def play_game(self, event: AstrMessageEvent, index: str = ""):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        state = self._game_sessions.get(session)
+        if not state:
+            yield event.plain_result("请先发送 /点游戏 [fc|街机|gba] 查看游戏目录。")
+            return
+        if not index.strip().isdigit() or int(index.strip()) < 1:
+            yield event.plain_result("用法：/玩游戏 <编号>")
+            return
+        items = state.get("items")
+        position = int(index.strip()) - 1
+        if not isinstance(items, list) or position >= len(items):
+            yield event.plain_result("游戏编号超出当前目录范围，请重新查看目录。")
+            return
+        item = items[position]
+        if not isinstance(item, dict) or not item.get("url"):
+            yield event.plain_result("这个游戏暂时没有可用链接。")
+            return
+        message = [Comp.Plain(text=f"{item.get('name', '游戏')}\n{item['url']}")]
+        if item.get("image"):
+            message.insert(0, Comp.Image.fromURL(str(item["image"])))
+        yield event.chain_result(message)
+
+    async def _game_catalog_result(
+        self,
+        event: AstrMessageEvent,
+        session: str,
+        category: str,
+        page: int,
+    ):
+        try:
+            items = await self.service.game_catalog(category, page)
+            self._game_sessions[session] = {
+                "category": category,
+                "page": page,
+                "items": items,
+            }
+            if not self.renderer:
+                names = "\n".join(
+                    f"{index}. {item['name']}" for index, item in enumerate(items, 1)
+                )
+                yield event.plain_result(f"{category} 第 {page} 页：\n{names}\n发送 /玩游戏 <编号> 选择游戏。")
+                return
+            page_html = self.service.game_list_html(category, page, items)
+            yield event.image_result(await self.renderer.render(page_html, viewport_width=1100))
+        except Exception as error:
+            logger.exception("Earth-K 在线游戏目录获取失败")
+            yield event.plain_result(f"在线游戏目录获取失败：{error}")
 
     @filter.command("卜卦")
     async def divination(self, event: AstrMessageEvent):
