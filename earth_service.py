@@ -56,6 +56,12 @@ HELP_GROUPS = [
             ("/石头、/剪刀、/布", "回答当前的群内猜拳"),
             ("/打他 <用户ID>", "管理员指定用户进行猜拳"),
             ("/挑选幸运儿", "从当前群成员中随机选择一人"),
+            ("/发起你说我猜", "发起群内你说我猜"),
+            ("/加入你说我猜", "加入当前的你说我猜"),
+            ("/开始你说我猜", "开始当前的你说我猜"),
+            ("/猜测 <答案>", "猜测当前你说我猜题词"),
+            ("/写答案 <答案>", "当前描述者自定义答案"),
+            ("/结束你说我猜", "发起者结束游戏"),
             ("/了解 <角色>", "发送本地角色资料图"),
             ("/角色语音汇总", "查看可用的原神角色语音"),
             ("/语音 <角色> [编号]", "播放角色中文语音"),
@@ -127,6 +133,7 @@ class EarthService:
         self._genshin_catalog_at = 0.0
         self._guess_aliases: dict[str, list[str]] = {}
         self._iq_questions: list[str] = []
+        self._you_say_words: list[str] = []
         meme_file = self.resources / "bq.json"
         if meme_file.is_file():
             try:
@@ -148,6 +155,16 @@ class EarthService:
                         str(question).strip()
                         for question in questions
                         if str(question).strip()
+                    ]
+            except (OSError, json.JSONDecodeError):
+                pass
+        say_words_file = self.resources / "json" / "you_say_guess" / "words.json"
+        if say_words_file.is_file():
+            try:
+                words = json.loads(say_words_file.read_text(encoding="utf-8"))
+                if isinstance(words, list):
+                    self._you_say_words = [
+                        str(word).strip() for word in words if str(word).strip()
                     ]
             except (OSError, json.JSONDecodeError):
                 pass
@@ -178,6 +195,37 @@ class EarthService:
         if not self._iq_questions:
             raise RuntimeError("智商题库为空")
         return random.choice(self._iq_questions)
+
+    def random_you_say_word(self, used: set[str]) -> str:
+        available = [word for word in self._you_say_words if word not in used]
+        if not available:
+            available = self._you_say_words
+        if not available:
+            raise RuntimeError("你说我猜词库为空")
+        return random.choice(available)
+
+    def group_game_score_html(
+        self,
+        title: str,
+        players: list[tuple[str, int]],
+        round_number: int,
+        total_rounds: int,
+    ) -> str:
+        css_path = self.resources / "html" / "YouDrawAndIGuess" / "index.css"
+        renderer = EarthRenderer(Path("."))
+        css = renderer.inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        rows = "".join(
+            f"<td>{html.escape(name)}-</td><td>{score}</td><tr>"
+            for name, score in players
+        )
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+</style></head><body>
+<div class="bt">{html.escape(title)}</div>
+<p class="nr">第{round_number}回合，共{total_rounds}回合</p>
+<div class="zhu"><table class="bg" border="0" width="650"><tbody>{rows}</tbody></table></div>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p>
+</body></html>'''
 
     @staticmethod
     def _guess_normalize(value: str) -> str:
