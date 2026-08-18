@@ -65,9 +65,13 @@ HELP_GROUPS = [
             ("/发起你说我猜", "发起群内你说我猜"),
             ("/加入你说我猜", "加入当前的你说我猜"),
             ("/开始你说我猜", "开始当前的你说我猜"),
-            ("/猜测 <答案>", "猜测当前你说我猜题词"),
+            ("/猜测 <答案>", "回答当前你说我猜或你画我猜"),
             ("/写答案 <答案>", "当前描述者自定义答案"),
             ("/结束你说我猜", "发起者结束游戏"),
+            ("/发起你画我猜", "发起群内你画我猜"),
+            ("/加入你画我猜", "加入当前的你画我猜"),
+            ("/开始你画我猜", "开始当前的你画我猜"),
+            ("/结束你画我猜", "发起者结束游戏"),
             ("/发起故事接龙", "发起群内故事接龙"),
             ("/加入故事接龙", "加入当前故事接龙"),
             ("/开始故事接龙", "房主开始故事接龙"),
@@ -161,6 +165,7 @@ class EarthService:
         self._guess_aliases: dict[str, list[str]] = {}
         self._iq_questions: list[str] = []
         self._you_say_words: list[str] = []
+        self._draw_words: list[str] = []
         self._story_keywords: list[str] = []
         self._genshin_video_catalogs: dict[str, list[dict[str, object]]] = {}
         meme_file = self.resources / "bq.json"
@@ -193,6 +198,16 @@ class EarthService:
                 words = json.loads(say_words_file.read_text(encoding="utf-8"))
                 if isinstance(words, list):
                     self._you_say_words = [
+                        str(word).strip() for word in words if str(word).strip()
+                    ]
+            except (OSError, json.JSONDecodeError):
+                pass
+        draw_words_file = self.resources / "json" / "draw_guess" / "words.json"
+        if draw_words_file.is_file():
+            try:
+                words = json.loads(draw_words_file.read_text(encoding="utf-8"))
+                if isinstance(words, list):
+                    self._draw_words = [
                         str(word).strip() for word in words if str(word).strip()
                     ]
             except (OSError, json.JSONDecodeError):
@@ -315,6 +330,14 @@ class EarthService:
             available = self._you_say_words
         if not available:
             raise RuntimeError("你说我猜词库为空")
+        return random.choice(available)
+
+    def random_draw_word(self, used: set[str]) -> str:
+        available = [word for word in self._draw_words if word not in used]
+        if not available:
+            available = self._draw_words
+        if not available:
+            raise RuntimeError("你画我猜词库为空")
         return random.choice(available)
 
     def random_story_keyword(self, used: set[str]) -> str:

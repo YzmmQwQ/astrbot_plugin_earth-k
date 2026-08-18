@@ -44,6 +44,7 @@ class EarthKPlugin(Star):
         self._hit_games: dict[str, dict[str, str]] = {}
         self._hit_timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._you_say_games: dict[str, dict[str, object]] = {}
+        self._draw_games: dict[str, dict[str, object]] = {}
         self._story_games: dict[str, dict[str, object]] = {}
         self._station_games: dict[str, dict[str, object]] = {}
         self._station_timeout_tasks: dict[str, asyncio.Task[None]] = {}
@@ -66,6 +67,7 @@ class EarthKPlugin(Star):
         self._hit_timeout_tasks.clear()
         self._hit_games.clear()
         self._you_say_games.clear()
+        self._draw_games.clear()
         self._story_games.clear()
         for task in self._station_timeout_tasks.values():
             task.cancel()
@@ -74,6 +76,31 @@ class EarthKPlugin(Star):
         self._marry_games.clear()
         if self.renderer:
             await self.renderer.stop()
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
+    async def draw_image_message(self, event: AstrMessageEvent):
+        """Accept a picture from the current drawer in an active game."""
+        if not event.get_group_id():
+            return
+        session = str(event.unified_msg_origin)
+        game = self._draw_games.get(session)
+        if not game or not game.get("started"):
+            return
+        if not any(isinstance(message, Comp.Image) for message in event.get_messages()):
+            return
+
+        players = game["players"]
+        current = players[int(game["turn"])]
+        user_id = str(event.get_sender_id())
+        if user_id != str(current["id"]):
+            return
+
+        game["image_received"] = True
+        event.stop_event()
+        yield event.chain_result([
+            Comp.At(qq=user_id),
+            Comp.Plain(text="已收到你的画作，其他玩家可以发送 /猜测 <答案>。"),
+        ])
 
     @filter.command("土块更新")
     async def update_command(self, event: AstrMessageEvent):
@@ -348,9 +375,13 @@ class EarthKPlugin(Star):
     async def you_say_guess(self, event: AstrMessageEvent, guess: str = ""):
         event.stop_event()
         if not event.get_group_id():
-            yield event.plain_result("你说我猜只能在群里进行")
+            yield event.plain_result("你说我猜或你画我猜只能在群里进行")
             return
         session = str(event.unified_msg_origin)
+        if session in self._draw_games:
+            async for result in self._draw_guess(event, guess):
+                yield result
+            return
         game = self._you_say_games.get(session)
         if not game or not game.get("started"):
             yield event.plain_result("当前没有进行中的你说我猜。")
@@ -423,6 +454,115 @@ class EarthKPlugin(Star):
             Comp.Plain(text=f"。{note}"),
         ])
 
+    async def _draw_guess(self, event: AstrMessageEvent, guess: str):
+        game = self._draw_games.get(str(event.unified_msg_origin))
+        if not game or not game.get("started"):
+            yield event.plain_result("当前没有进行中的你画我猜。")
+            return
+        guess = guess.strip()
+        if not guess:
+            yield event.plain_result("用法：/猜测 <答案>")
+            return
+        players = game["players"]
+        user_id = str(event.get_sender_id())
+        player_ids = {str(player["id"]) for player in players}
+        if user_id not in player_ids:
+            yield event.plain_result("只有加入游戏的玩家可以猜测。")
+            return
+        current = players[int(game["turn"])]
+        if user_id == str(current["id"]):
+            yield event.plain_result("当前是你的作画回合，请等待其他玩家猜测。")
+            return
+        if not game.get("image_received"):
+            yield event.plain_result("当前画手还没有发送画作，请稍等。")
+            return
+        if guess.casefold().strip() != str(game["answer"]).casefold().strip():
+            yield event.plain_result("还没猜中，继续看画。")
+            return
+
+        scores = game["scores"]
+        score_names = game["score_names"]
+        scores[user_id] = int(scores.get(user_id, 0)) + 1
+        score_names[user_id] = event.get_sender_name() or score_names.get(user_id, user_id)
+        game["turn_count"] = int(game["turn_count"]) + 1
+        ranking = sorted(
+            ((str(name), int(scores.get(str(player_id), 0))) for player_id, name in score_names.items()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        answer = str(game["answer"])
+        if int(game["turn_count"]) >= int(game["total_turns"]):
+            self._draw_games.pop(str(event.unified_msg_origin), None)
+            if self.renderer:
+                try:
+                    image = await self.renderer.render(
+                        self.service.group_game_score_html(
+                            "你画我猜", ranking, int(game["turn_count"]), int(game["total_turns"])
+                        ),
+                        viewport_width=860,
+                    )
+                    yield event.image_result(image)
+                except Exception as error:
+                    logger.exception("Earth-K 你画我猜最终计分图渲染失败")
+                    yield event.plain_result(f"最终计分图渲染失败：{error}")
+            yield event.plain_result(
+                f"恭喜答对！答案是：{answer}。你画我猜结束，最终得分："
+                + "、".join(f"{name}：{score}分" for name, score in ranking)
+            )
+            return
+
+        game["turn"] = (int(game["turn"]) + 1) % len(players)
+        current = players[int(game["turn"])]
+        game["used"].add(answer)
+        game["answer"] = self.service.random_draw_word(game["used"])
+        game["image_received"] = False
+        sent = await self._send_draw_word(event, str(current["id"]), str(game["answer"]))
+        if self.renderer:
+            try:
+                image = await self.renderer.render(
+                    self.service.group_game_score_html(
+                        "你画我猜", ranking, int(game["turn_count"]), int(game["total_turns"])
+                    ),
+                    viewport_width=860,
+                )
+                yield event.image_result(image)
+            except Exception as error:
+                logger.exception("Earth-K 你画我猜计分图渲染失败")
+                yield event.plain_result(f"计分图渲染失败：{error}")
+        note = "题目已私聊给下一位画手。" if sent else "无法私聊下一位画手，请检查平台私聊权限。"
+        yield event.chain_result([
+            Comp.At(qq=user_id),
+            Comp.Plain(text=f"回答正确，答案是：{answer}。下一位画手是 "),
+            Comp.At(qq=str(current["id"])),
+            Comp.Plain(text=f"。请在群里发送画作。{note}"),
+        ])
+
+    @filter.command("结束你画我猜")
+    async def draw_end(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        game = self._draw_games.get(session)
+        if not game:
+            yield event.plain_result("当前没有进行中的你画我猜。")
+            return
+        if str(game.get("host")) != str(event.get_sender_id()):
+            yield event.plain_result("只有发起者可以结束游戏。")
+            return
+        self._draw_games.pop(session, None)
+        yield event.plain_result("你画我猜已结束。")
+
+    async def _send_draw_word(self, event: AstrMessageEvent, user_id: str, word: str) -> bool:
+        private_umo = f"{event.get_platform_id()}:FriendMessage:{user_id}"
+        try:
+            await self.context.send_message(
+                private_umo,
+                MessageChain([Comp.Plain(text=f"你画我猜的题目是：{word}。请在群里画好后发送图片。")]),
+            )
+            return True
+        except Exception as error:
+            logger.error(f"Earth-K 你画我猜私聊题目失败: {error}")
+            return False
+
     @filter.command("写答案")
     async def you_say_set_answer(self, event: AstrMessageEvent, answer: str = ""):
         event.stop_event()
@@ -456,6 +596,91 @@ class EarthKPlugin(Star):
             return
         self._you_say_games.pop(session, None)
         yield event.plain_result("你说我猜已结束。")
+
+    @filter.command("发起你画我猜")
+    async def draw_start(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("你画我猜只能在群里发起")
+            return
+        session = str(event.unified_msg_origin)
+        if session in self._draw_games:
+            yield event.plain_result("当前群已经发起过你画我猜了。")
+            return
+        if session in self._you_say_games:
+            yield event.plain_result("当前群正在进行你说我猜，请先结束那局游戏。")
+            return
+        self._draw_games[session] = {
+            "host": str(event.get_sender_id()),
+            "players": [],
+            "started": False,
+        }
+        yield event.plain_result("你画我猜已发起，发送 /加入你画我猜 报名。")
+
+    @filter.command("加入你画我猜")
+    async def draw_join(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("你画我猜只能在群里加入")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._draw_games.get(session)
+        if not game:
+            yield event.plain_result("游戏还没发起，请先发送 /发起你画我猜。")
+            return
+        if game.get("started"):
+            yield event.plain_result("游戏已经开始了，不能再加入。")
+            return
+        players = game["players"]
+        user_id = str(event.get_sender_id())
+        if any(str(player["id"]) == user_id for player in players):
+            yield event.plain_result("你已经加入游戏了！")
+            return
+        players.append({"id": user_id, "name": event.get_sender_name() or user_id})
+        yield event.chain_result([
+            Comp.At(qq=user_id),
+            Comp.Plain(text=f"加入游戏成功，当前人数 {len(players)} 人。"),
+        ])
+
+    @filter.command("开始你画我猜")
+    async def draw_begin(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("你画我猜只能在群里开始")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._draw_games.get(session)
+        if not game:
+            yield event.plain_result("游戏还没发起，请先发送 /发起你画我猜。")
+            return
+        if str(game.get("host")) != str(event.get_sender_id()):
+            yield event.plain_result("只有发起者可以开始游戏。")
+            return
+        if game.get("started"):
+            yield event.plain_result("游戏已经开始了。")
+            return
+        players = game["players"]
+        if len(players) < 2:
+            yield event.plain_result("至少需要两名玩家加入游戏。")
+            return
+        game.update({
+            "started": True,
+            "turn": 0,
+            "turn_count": 0,
+            "total_turns": len(players) * 2,
+            "used": set(),
+            "scores": {str(player["id"]): 0 for player in players},
+            "score_names": {str(player["id"]): player["name"] for player in players},
+            "answer": self.service.random_draw_word(set()),
+            "image_received": False,
+        })
+        current = players[0]
+        sent = await self._send_draw_word(event, str(current["id"]), str(game["answer"]))
+        private_note = "题目已私聊给第一位画手。" if sent else "无法私聊第一位画手，请检查平台私聊权限。"
+        yield event.chain_result([
+            Comp.At(qq=str(current["id"])),
+            Comp.Plain(text=f"你画我猜已开始，请在群里发送画作。{private_note}"),
+        ])
 
     async def _send_you_say_word(self, event: AstrMessageEvent, user_id: str, word: str) -> bool:
         private_umo = f"{event.get_platform_id()}:FriendMessage:{user_id}"
