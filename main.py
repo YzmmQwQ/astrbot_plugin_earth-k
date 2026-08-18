@@ -106,7 +106,7 @@ class EarthKPlugin(Star):
 
     @filter.command("土块更新")
     async def update_command(self, event: AstrMessageEvent):
-        """Use AstrBot's updater instead of the old Yunzai update script."""
+        """Use AstrBot's official updater and reload the plugin."""
         event.stop_event()
         if not event.is_admin():
             yield event.plain_result("该命令仅限管理员使用")
