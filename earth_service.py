@@ -42,6 +42,11 @@ HOYOWIKI_MENUS = {
     "教程": "14",
     "动物": "15",
 }
+GENSHIN_VIDEO_API = "https://api-static.mihoyo.com/common/blackboard/ys_obc/v1"
+GENSHIN_VIDEO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+    "Referer": "https://ys.mihoyo.com/",
+}
 
 
 HELP_GROUPS = [
@@ -79,6 +84,10 @@ HELP_GROUPS = [
             ("/猜语音答案 <角色>", "回答当前猜语音"),
             ("/公布语音答案", "公布当前猜语音答案"),
             ("/重置语音分数", "管理员重置当前会话猜语音分数"),
+            ("/角色视频列表", "查看原神角色视频目录"),
+            ("/角色视频 <编号>", "播放指定的原神角色视频"),
+            ("/过场动画列表", "查看原神过场动画目录"),
+            ("/过场动画 <编号>", "播放指定的原神过场动画"),
             ("/原史 <名称>", "查询原神角色、武器、圣遗物等资料"),
             ("/原史目录 <分类>", "查看原神资料分类目录"),
             ("/猜原神", "开始一轮本地题库猜原神"),
@@ -144,6 +153,7 @@ class EarthService:
         self._iq_questions: list[str] = []
         self._you_say_words: list[str] = []
         self._story_keywords: list[str] = []
+        self._genshin_video_catalogs: dict[str, list[dict[str, object]]] = {}
         meme_file = self.resources / "bq.json"
         if meme_file.is_file():
             try:
@@ -630,6 +640,88 @@ class EarthService:
     async def download_voice(self, url: str, output_path: Path) -> Path:
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(headers=HOYOWIKI_HEADERS, timeout=timeout) as session:
+            async with session.get(url) as response:
+                response.raise_for_status()
+                payload = await response.read()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(payload)
+        return output_path
+
+    async def genshin_video_catalog(self, category: str) -> list[dict[str, object]]:
+        """Load the two video directories used by the legacy 原神视频 command."""
+        if category in self._genshin_video_catalogs:
+            return self._genshin_video_catalogs[category]
+        child_index = {"角色视频": 0, "过场动画": 2}.get(category)
+        if child_index is None:
+            raise RuntimeError("未知的原神视频分类")
+        url = f"{GENSHIN_VIDEO_API}/home/content/list"
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(headers=GENSHIN_VIDEO_HEADERS, timeout=timeout) as session:
+                async with session.get(url, params={"app_sn": "ys_obc", "channel_id": "80"}) as response:
+                    response.raise_for_status()
+                    payload = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"{category}目录获取失败：{error}") from error
+        try:
+            children = payload["data"]["list"][0]["children"]
+            raw_items = children[child_index]["list"]
+        except (KeyError, IndexError, TypeError) as error:
+            raise RuntimeError(f"{category}目录返回格式错误") from error
+        entries = []
+        for index, item in enumerate(raw_items, 1):
+            if not isinstance(item, dict) or not item.get("content_id") or not item.get("title"):
+                continue
+            entries.append({
+                "id": index,
+                "content_id": str(item["content_id"]),
+                "title": str(item["title"]).strip(),
+            })
+        if not entries:
+            raise RuntimeError(f"{category}目录为空")
+        self._genshin_video_catalogs[category] = entries
+        return entries
+
+    async def genshin_video_url(self, content_id: str) -> str:
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(headers=GENSHIN_VIDEO_HEADERS, timeout=timeout) as session:
+                async with session.get(
+                    f"{GENSHIN_VIDEO_API}/content/info",
+                    params={"app_sn": "ys_obc", "content_id": content_id},
+                ) as response:
+                    response.raise_for_status()
+                    payload = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"视频详情获取失败：{error}") from error
+        url = self._find_mp4_url(payload)
+        if not url:
+            raise RuntimeError("视频详情中没有找到可用的 mp4 地址")
+        return url
+
+    @classmethod
+    def _find_mp4_url(cls, value: object) -> str:
+        if isinstance(value, dict):
+            for item in value.values():
+                result = cls._find_mp4_url(item)
+                if result:
+                    return result
+            return ""
+        if isinstance(value, list):
+            for item in value:
+                result = cls._find_mp4_url(item)
+                if result:
+                    return result
+            return ""
+        if not isinstance(value, str):
+            return ""
+        text = html.unescape(value).replace("\\/", "/").replace("\\u0026", "&")
+        matches = re.findall(r'''https?://[^"'<> ]+?\.mp4[^"'<> ]*''', text, flags=re.IGNORECASE)
+        return matches[0] if matches else ""
+
+    async def download_video(self, url: str, output_path: Path) -> Path:
+        timeout = aiohttp.ClientTimeout(total=90)
+        async with aiohttp.ClientSession(headers=GENSHIN_VIDEO_HEADERS, timeout=timeout) as session:
             async with session.get(url) as response:
                 response.raise_for_status()
                 payload = await response.read()

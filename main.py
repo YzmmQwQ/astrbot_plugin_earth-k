@@ -1015,6 +1015,67 @@ class EarthKPlugin(Star):
         self._voice_scores.pop(session, None)
         yield event.plain_result("当前会话的猜语音分数已重置")
 
+    @filter.command("角色视频列表")
+    async def genshin_character_video_list(self, event: AstrMessageEvent):
+        event.stop_event()
+        async for result in self._send_genshin_video_list(event, "角色视频"):
+            yield result
+
+    @filter.command("角色视频")
+    async def genshin_character_video(self, event: AstrMessageEvent, index: str = ""):
+        event.stop_event()
+        async for result in self._send_genshin_video(event, "角色视频", index):
+            yield result
+
+    @filter.command("过场动画列表")
+    async def genshin_cutscene_list(self, event: AstrMessageEvent):
+        event.stop_event()
+        async for result in self._send_genshin_video_list(event, "过场动画"):
+            yield result
+
+    @filter.command("过场动画")
+    async def genshin_cutscene(self, event: AstrMessageEvent, index: str = ""):
+        event.stop_event()
+        async for result in self._send_genshin_video(event, "过场动画", index):
+            yield result
+
+    async def _send_genshin_video_list(self, event: AstrMessageEvent, category: str):
+        try:
+            catalog = await self.service.genshin_video_catalog(category)
+            if self.renderer:
+                page = self.service.genshin_history_directory_html(category, catalog)
+                yield event.image_result(await self.renderer.render(page, viewport_width=1200))
+            else:
+                names = "\n".join(f"{item['id']}. {item['title']}" for item in catalog)
+                yield event.plain_result(f"{category}目录：\n{names}")
+        except Exception as error:
+            logger.exception(f"Earth-K {category}目录获取失败")
+            yield event.plain_result(f"{category}目录获取失败：{error}")
+
+    async def _send_genshin_video(self, event: AstrMessageEvent, category: str, index: str):
+        index = index.strip()
+        if not index.isdigit() or int(index) < 1:
+            yield event.plain_result(f"用法：/{category} <编号>，发送 /{category}列表 查看目录")
+            return
+        try:
+            catalog = await self.service.genshin_video_catalog(category)
+            position = int(index) - 1
+            if position >= len(catalog):
+                yield event.plain_result(f"编号范围为 1-{len(catalog)}。")
+                return
+            item = catalog[position]
+            url = await self.service.genshin_video_url(str(item["content_id"]))
+            output_dir = self.data_dir or Path(StarTools.get_data_dir(self.name))
+            output = output_dir / "video" / f"earth-k-{uuid4().hex}.mp4"
+            await self.service.download_video(url, output)
+            yield event.chain_result([
+                Comp.Plain(text=f"{item['title']}："),
+                Comp.Video.fromFileSystem(str(output)),
+            ])
+        except Exception as error:
+            logger.exception(f"Earth-K {category}播放失败")
+            yield event.plain_result(f"{category}播放失败：{error}")
+
     @filter.command("原史目录")
     async def genshin_history_directory(self, event: AstrMessageEvent, category: str = ""):
         event.stop_event()
