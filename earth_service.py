@@ -52,6 +52,12 @@ HELP_GROUPS = [
             ("/练习记忆力", "观察数字卡后，用 /我猜 <字母> 作答"),
             ("/今日运势", "查看今日运势"),
             ("/了解 <角色>", "发送本地角色资料图"),
+            ("/角色语音汇总", "查看可用的原神角色语音"),
+            ("/语音 <角色> [编号]", "播放角色中文语音"),
+            ("/猜语音", "开始一轮原神猜语音"),
+            ("/猜语音答案 <角色>", "回答当前猜语音"),
+            ("/公布语音答案", "公布当前猜语音答案"),
+            ("/重置语音分数", "管理员重置当前会话猜语音分数"),
             ("/原史 <名称>", "查询原神角色、武器、圣遗物等资料"),
             ("/原史目录 <分类>", "查看原神资料分类目录"),
             ("/大话骰规则", "发送大话骰规则图"),
@@ -77,7 +83,7 @@ HELP_GROUPS = [
         "迁移中的功能",
         [
             ("点歌、视频、小说、漫画", "正在替换 Yunzai 网络接口和消息段"),
-            ("猜原神、猜语音、群小游戏", "正在迁移会话状态和群消息流程"),
+            ("猜原神、群小游戏", "正在迁移会话状态和群消息流程"),
             ("角色语音、角色视频", "正在迁移数据接口和消息发送"),
             ("AI 绘图", "单独评估配置、审核和外部服务，不随本批启用"),
         ],
@@ -287,6 +293,137 @@ class EarthService:
             body += f"\n\n（{warning}）"
         image = await self._history_image_uri(image)
         return {"title": title, "body": body or summary or "暂无资料正文。", "image": image, "warning": warning}
+
+    async def genshin_character_entries(self) -> list[dict[str, object]]:
+        """Return current character entries from HoYoWiki for voice lookup and quizzes."""
+        entries: list[dict[str, object]] = []
+        page_num = 1
+        total = None
+        while total is None or len(entries) < total:
+            payload = await self._hoyowiki_json(
+                "POST",
+                "/get_entry_page_list",
+                json_body={
+                    "filters": [],
+                    "menu_id": HOYOWIKI_MENUS["角色"],
+                    "page_num": page_num,
+                    "page_size": 30,
+                    "use_es": True,
+                },
+            )
+            data = ((payload.get("data") or {}) if isinstance(payload, dict) else {})
+            items = data.get("list") or []
+            total = int(data.get("total") or 0)
+            if not items:
+                break
+            for item in items:
+                if not isinstance(item, dict) or not item.get("entry_page_id") or not item.get("name"):
+                    continue
+                entries.append({
+                    "id": str(item["entry_page_id"]),
+                    "category": "角色",
+                    "content_id": str(item["entry_page_id"]),
+                    "title": str(item["name"]).strip(),
+                    "summary": str(item.get("desc") or "").strip(),
+                    "icon": str(item.get("icon_url") or "").strip(),
+                    "alias": "",
+                })
+            page_num += 1
+            if page_num > 100:
+                break
+        return entries
+
+    async def genshin_voice_entry(self, query: str) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+        entry, matches = await self.genshin_history_find(query)
+        if entry is None:
+            return None, matches
+        payload = await self._hoyowiki_json(
+            "GET",
+            "/entry_page",
+            params={"entry_page_id": str(entry["content_id"])},
+        )
+        voice_items = self._hoyowiki_voice_items(payload)
+        if not voice_items:
+            return None, [{"title": str(entry["title"]), "reason": "该角色没有可用语音"}]
+        result = dict(entry)
+        result["voice_items"] = voice_items
+        return result, [result]
+
+    async def genshin_random_voice(self) -> tuple[dict[str, object], dict[str, object]]:
+        entries = await self.genshin_character_entries()
+        random.shuffle(entries)
+        for entry in entries[:30]:
+            payload = await self._hoyowiki_json(
+                "GET",
+                "/entry_page",
+                params={"entry_page_id": str(entry["content_id"])},
+            )
+            voice_items = self._hoyowiki_voice_items(payload)
+            if voice_items:
+                return entry, random.choice(voice_items)
+        raise RuntimeError("暂时没有找到可用的角色语音")
+
+    @staticmethod
+    def _hoyowiki_voice_items(payload: object) -> list[dict[str, str]]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+            return []
+        page = payload["data"].get("page")
+        if not isinstance(page, dict):
+            return []
+        items: list[dict[str, str]] = []
+        for module in page.get("modules") or []:
+            if not isinstance(module, dict) or str(module.get("name") or "") != "语音":
+                continue
+            for component in module.get("components") or []:
+                if not isinstance(component, dict):
+                    continue
+                raw_data = component.get("data")
+                if not isinstance(raw_data, str):
+                    continue
+                try:
+                    data = json.loads(raw_data)
+                except json.JSONDecodeError:
+                    continue
+                for row in data.get("list") or []:
+                    if not isinstance(row, dict) or not row.get("title"):
+                        continue
+                    audio_url = ""
+                    for audio in row.get("audios") or []:
+                        if isinstance(audio, dict) and str(audio.get("name") or "").upper() == "CN":
+                            audio_url = str(audio.get("url") or "")
+                            break
+                    if audio_url:
+                        items.append({
+                            "name": str(row["title"]),
+                            "content": str(row.get("desc") or ""),
+                            "audio_url": audio_url,
+                        })
+        return items
+
+    async def download_voice(self, url: str, output_path: Path) -> Path:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(headers=HOYOWIKI_HEADERS, timeout=timeout) as session:
+            async with session.get(url) as response:
+                response.raise_for_status()
+                payload = await response.read()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(payload)
+        return output_path
+
+    def genshin_voice_list_html(self, character: str, items: list[dict[str, str]]) -> str:
+        css_path = self.resources / "html" / "GenshinSpeak" / "index.css"
+        css = EarthRenderer(Path(".")).inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        rows = "".join(
+            f'<tr><td class="id">{index} - {html.escape(item["name"])}</td></tr>'
+            f'<tr><td class="nei">{html.escape(item["content"])}</td></tr>'
+            for index, item in enumerate(items, 1)
+        )
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>{css}
+body {{ width: auto; min-height: 100vh; }} .bg {{ width: 760px; }}
+</style></head><body><div class="bt">{html.escape(character)}</div>
+<p class="nr">以下为{html.escape(character)}语音列表，可发送 /语音 {html.escape(character)} 编号播放</p>
+<div class="zhu"><table class="bg">{rows}</table></div>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p></body></html>'''
 
     @staticmethod
     def _history_content_text(payload: object) -> tuple[str, str]:

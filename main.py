@@ -35,6 +35,8 @@ class EarthKPlugin(Star):
         self._memory_games: dict[str, dict[str, object]] = {}
         self._memory_scores: dict[tuple[str, str], int] = {}
         self._dice_games: dict[str, dict[str, object]] = {}
+        self._voice_games: dict[str, dict[str, object]] = {}
+        self._voice_scores: dict[str, dict[str, object]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -116,6 +118,145 @@ class EarthKPlugin(Star):
             yield event.plain_result("该角色资料图正在筹备中，欸嘿")
             return
         yield event.image_result(str(image))
+
+    @filter.command("角色语音汇总")
+    async def voice_summary(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not self.renderer:
+            yield event.plain_result("本地 HTML 渲染器未启动")
+            return
+        try:
+            entries = await self.service.genshin_character_entries()
+            items = [{"name": str(entry["title"]), "content": str(entry.get("summary") or "")} for entry in entries]
+            html = self.service.genshin_voice_list_html("角色", items)
+            yield event.image_result(await self.renderer.render(html, viewport_width=1200))
+        except Exception as error:
+            logger.exception("Earth-K 角色语音汇总失败")
+            yield event.plain_result(f"角色语音汇总获取失败：{error}")
+
+    @filter.command("语音")
+    async def voice_play(self, event: AstrMessageEvent, payload: str = ""):
+        event.stop_event()
+        parts = payload.strip().split()
+        if not parts:
+            yield event.plain_result("用法：/语音 <角色> [编号]，例如 /语音 胡桃 1；发送 /角色语音汇总查看角色名。")
+            return
+        index = None
+        if parts[-1].isdigit():
+            index = int(parts.pop()) - 1
+        character = " ".join(parts).strip()
+        if not character:
+            yield event.plain_result("请提供角色名。")
+            return
+        try:
+            entry, matches = await self.service.genshin_voice_entry(character)
+            if entry is None:
+                if matches:
+                    names = "、".join(str(item.get("title") or "") for item in matches[:12])
+                    yield event.plain_result(f"没有唯一匹配，请输入更完整的角色名：{names}")
+                else:
+                    yield event.plain_result("没有找到该角色的语音。")
+                return
+            items = entry["voice_items"]
+            if not isinstance(items, list) or not items:
+                yield event.plain_result("该角色没有可用语音。")
+                return
+            if index is None:
+                index = random.randrange(len(items))
+            if not 0 <= index < len(items):
+                yield event.plain_result(f"语音编号范围为 1-{len(items)}。")
+                return
+            item = items[index]
+            output_dir = self.data_dir or Path(StarTools.get_data_dir(self.name))
+            output = output_dir / "voice" / f"earth-k-{uuid4().hex}.wav"
+            await self.service.download_voice(str(item["audio_url"]), output)
+            yield event.chain_result([
+                Comp.Plain(text=f"{entry['title']}：{item['name']}\n{item['content']}"),
+                Comp.Record.fromFileSystem(str(output)),
+            ])
+        except Exception as error:
+            logger.exception("Earth-K 角色语音播放失败")
+            yield event.plain_result(f"角色语音获取失败：{error}")
+
+    @filter.command("猜语音")
+    async def voice_quiz_start(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        if session in self._voice_games:
+            yield event.plain_result("当前已经有一轮猜语音，请发送 /猜语音答案 <角色> 或 /公布语音答案。")
+            return
+        try:
+            entry, item = await self.service.genshin_random_voice()
+            output_dir = self.data_dir or Path(StarTools.get_data_dir(self.name))
+            output = output_dir / "voice" / f"earth-k-quiz-{uuid4().hex}.wav"
+            await self.service.download_voice(str(item["audio_url"]), output)
+            state = self._voice_scores.setdefault(session, {"round": 0, "scores": {}})
+            state["round"] = int(state.get("round", 0)) + 1
+            self._voice_games[session] = {
+                "answer": str(entry["title"]),
+                "round": int(state["round"]),
+            }
+            yield event.chain_result([
+                Comp.Plain(text=f"猜语音第 {state['round']}/10 回合，请猜是哪位角色。\n发送 /猜语音答案 <角色> 作答。"),
+                Comp.Record.fromFileSystem(str(output)),
+            ])
+        except Exception as error:
+            logger.exception("Earth-K 猜语音开始失败")
+            yield event.plain_result(f"猜语音开始失败：{error}")
+
+    @filter.command("猜语音答案")
+    async def voice_quiz_answer(self, event: AstrMessageEvent, answer: str = ""):
+        event.stop_event()
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        game = self._voice_games.get(session)
+        if not game:
+            yield event.plain_result("当前没有进行中的猜语音，请先发送 /猜语音。")
+            return
+        answer = answer.strip()
+        if not answer:
+            yield event.plain_result("用法：/猜语音答案 <角色>")
+            return
+        if self.service._history_normalize(answer) != self.service._history_normalize(str(game["answer"])):
+            yield event.plain_result("回答不正确，可以继续猜，或发送 /公布语音答案。")
+            return
+        state = self._voice_scores.setdefault(session, {"round": int(game["round"]), "scores": {}})
+        scores = state.setdefault("scores", {})
+        sender = str(event.get_sender_id())
+        scores[sender] = int(scores.get(sender, 0)) + 1
+        round_number = int(game["round"])
+        answer_name = str(game["answer"])
+        self._voice_games.pop(session, None)
+        if round_number >= 10:
+            ranking = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+            result = "、".join(f"{user}：{score}分" for user, score in ranking) or "暂无得分"
+            self._voice_scores.pop(session, None)
+            yield event.plain_result(f"答对了！答案是{answer_name}。\n十回合结束，最终得分：{result}")
+            return
+        yield event.plain_result(
+            f"答对了！答案是{answer_name}，你当前 {scores[sender]} 分。\n"
+            f"发送 /猜语音 开始第 {round_number + 1}/10 回合。"
+        )
+
+    @filter.command("公布语音答案")
+    async def voice_quiz_reveal(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        game = self._voice_games.pop(session, None)
+        if not game:
+            yield event.plain_result("当前没有进行中的猜语音。")
+            return
+        yield event.plain_result(f"答案是：{game['answer']}。当前回合结束，请发送 /猜语音 继续。")
+
+    @filter.command("重置语音分数")
+    async def voice_quiz_reset(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.is_admin():
+            yield event.plain_result("该命令仅限管理员使用")
+            return
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        self._voice_games.pop(session, None)
+        self._voice_scores.pop(session, None)
+        yield event.plain_result("当前会话的猜语音分数已重置")
 
     @filter.command("原史目录")
     async def genshin_history_directory(self, event: AstrMessageEvent, category: str = ""):
