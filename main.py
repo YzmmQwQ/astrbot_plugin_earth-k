@@ -40,6 +40,8 @@ class EarthKPlugin(Star):
         self._guess_games: dict[str, dict[str, object]] = {}
         self._guess_scores: dict[str, dict[str, int]] = {}
         self._guess_names: dict[str, dict[str, str]] = {}
+        self._hit_games: dict[str, dict[str, str]] = {}
+        self._hit_timeout_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -53,6 +55,10 @@ class EarthKPlugin(Star):
         logger.info("Earth-K AstrBot 迁移版已加载")
 
     async def terminate(self) -> None:
+        for task in self._hit_timeout_tasks.values():
+            task.cancel()
+        self._hit_timeout_tasks.clear()
+        self._hit_games.clear()
         if self.renderer:
             await self.renderer.stop()
 
@@ -122,6 +128,130 @@ class EarthKPlugin(Star):
         except Exception as error:
             logger.exception("Earth-K 智商题获取失败")
             yield event.plain_result(f"智商题获取失败：{error}")
+
+    @filter.command("打我")
+    async def hit_me(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("只能在群里被打")
+            return
+        session = str(event.unified_msg_origin)
+        if session in self._hit_games:
+            yield event.plain_result("我正在打别人，没空，你待会再挨打。")
+            return
+        await self._start_hit_game(session, str(event.get_sender_id()), event.get_sender_name())
+        yield event.chain_result([
+            Comp.At(qq=event.get_sender_id()),
+            Comp.Plain(text="给你 20 秒，跟我来猜拳。赢了我就不打你，输了就寄！请发送 /石头、/剪刀 或 /布。"),
+        ])
+
+    @filter.command("打他")
+    async def hit_other(self, event: AstrMessageEvent, target_id: str = ""):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("只能在群里发起群内猜拳")
+            return
+        if not event.is_admin():
+            yield event.plain_result("该命令仅限管理员使用")
+            return
+        target_id = target_id.strip()
+        if not target_id:
+            yield event.plain_result("用法：/打他 <用户ID>，然后由对方发送 /石头、/剪刀 或 /布。")
+            return
+        session = str(event.unified_msg_origin)
+        if session in self._hit_games:
+            yield event.plain_result("当前群已经有一局猜拳，请先等本局结束。")
+            return
+        await self._start_hit_game(session, target_id, target_id)
+        yield event.plain_result(
+            f"已向用户 {target_id} 发起猜拳，对方有 20 秒发送 /石头、/剪刀 或 /布。"
+        )
+
+    @filter.command("石头")
+    async def hit_rock(self, event: AstrMessageEvent):
+        event.stop_event()
+        yield event.plain_result(await self._play_hit_choice(event, "石头"))
+
+    @filter.command("剪刀")
+    async def hit_scissors(self, event: AstrMessageEvent):
+        event.stop_event()
+        yield event.plain_result(await self._play_hit_choice(event, "剪刀"))
+
+    @filter.command("布")
+    async def hit_paper(self, event: AstrMessageEvent):
+        event.stop_event()
+        yield event.plain_result(await self._play_hit_choice(event, "布"))
+
+    async def _start_hit_game(self, session: str, target_id: str, target_name: str) -> None:
+        self._hit_games[session] = {"target_id": target_id, "target_name": target_name or target_id}
+        previous = self._hit_timeout_tasks.pop(session, None)
+        if previous:
+            previous.cancel()
+        self._hit_timeout_tasks[session] = asyncio.create_task(self._hit_timeout(session, target_id))
+
+    async def _hit_timeout(self, session: str, target_id: str) -> None:
+        try:
+            await asyncio.sleep(20)
+            game = self._hit_games.get(session)
+            if not game or game.get("target_id") != target_id:
+                return
+            self._hit_games.pop(session, None)
+            await self.context.send_message(
+                session,
+                MessageChain([Comp.Plain(text=f"用户 {target_id} 20 秒没有出拳，本局猜拳结束。")]),
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as error:
+            logger.error(f"Earth-K 打我超时消息发送失败: {error}")
+        finally:
+            self._hit_timeout_tasks.pop(session, None)
+
+    async def _play_hit_choice(self, event: AstrMessageEvent, player_choice: str) -> str:
+        if not event.get_group_id():
+            return "只能在群里被打"
+        session = str(event.unified_msg_origin)
+        game = self._hit_games.get(session)
+        if not game:
+            return "当前没有进行中的猜拳，请先发送 /打我。"
+        if str(game["target_id"]) != str(event.get_sender_id()):
+            return "这局猜拳不是你的。"
+        bot_choice = random.choice(("石头", "剪刀", "布"))
+        self._hit_games.pop(session, None)
+        timeout = self._hit_timeout_tasks.pop(session, None)
+        if timeout:
+            timeout.cancel()
+        if player_choice == bot_choice:
+            result = "平局，饶你一回。"
+        elif (player_choice, bot_choice) in {("石头", "剪刀"), ("剪刀", "布"), ("布", "石头")}:
+            result = "你赢了，这次不打你。"
+        else:
+            result = "你输了，但 AstrBot 不执行自动禁言。"
+        return f"我出{bot_choice}，你出{player_choice}。{result}"
+
+    @filter.command("挑选幸运儿")
+    async def choose_lucky(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("只能在群里挑选幸运儿")
+            return
+        try:
+            group = await event.get_group()
+            members = list(getattr(group, "members", None) or []) if group else []
+            members = [member for member in members if str(getattr(member, "user_id", "")) != str(event.get_self_id())]
+            if not members:
+                yield event.plain_result("暂时获取不到当前群成员列表")
+                return
+            lucky = random.choice(members)
+            user_id = str(getattr(lucky, "user_id", ""))
+            name = str(getattr(lucky, "nickname", "") or user_id)
+            yield event.chain_result([
+                Comp.At(qq=user_id),
+                Comp.Plain(text=f"今天的幸运儿是 {name}（{user_id}）！"),
+            ])
+        except Exception as error:
+            logger.exception("Earth-K 幸运儿选择失败")
+            yield event.plain_result(f"选择幸运儿失败：{error}")
 
     @filter.command("了解")
     async def character_info(self, event: AstrMessageEvent, character: str = ""):
