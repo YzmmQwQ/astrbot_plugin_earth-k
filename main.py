@@ -45,6 +45,8 @@ class EarthKPlugin(Star):
         self._hit_timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._you_say_games: dict[str, dict[str, object]] = {}
         self._story_games: dict[str, dict[str, object]] = {}
+        self._station_games: dict[str, dict[str, object]] = {}
+        self._station_timeout_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -64,6 +66,10 @@ class EarthKPlugin(Star):
         self._hit_games.clear()
         self._you_say_games.clear()
         self._story_games.clear()
+        for task in self._station_timeout_tasks.values():
+            task.cancel()
+        self._station_timeout_tasks.clear()
+        self._station_games.clear()
         if self.renderer:
             await self.renderer.stop()
 
@@ -624,6 +630,242 @@ class EarthKPlugin(Star):
             return
         self._story_games.pop(session, None)
         yield event.plain_result("故事接龙已结束。")
+
+    @filter.command("发起一站到底")
+    async def station_start(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("一站到底只能在群里发起")
+            return
+        session = str(event.unified_msg_origin)
+        if session in self._station_games:
+            yield event.plain_result("当前群已经发起过一站到底了。")
+            return
+        user_id = str(event.get_sender_id())
+        self._station_games[session] = {
+            "host": user_id,
+            "players": [{"id": user_id, "name": event.get_sender_name() or user_id}],
+            "started": False,
+        }
+        yield event.plain_result("一站到底已发起，发起者已加入，发送 /加入一站到底 报名。")
+
+    @filter.command("加入一站到底")
+    async def station_join(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("一站到底只能在群里加入")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._station_games.get(session)
+        if not game:
+            yield event.plain_result("游戏还没发起，请先发送 /发起一站到底。")
+            return
+        if game.get("started"):
+            yield event.plain_result("一站到底已经开始，不能再加入。")
+            return
+        user_id = str(event.get_sender_id())
+        players = game["players"]
+        if any(str(player["id"]) == user_id for player in players):
+            yield event.plain_result("你已经加入一站到底了！")
+            return
+        players.append({"id": user_id, "name": event.get_sender_name() or user_id})
+        yield event.chain_result([
+            Comp.At(qq=user_id),
+            Comp.Plain(text=f"加入一站到底成功，当前人数 {len(players)} 人。"),
+        ])
+
+    @filter.command("开始一站到底")
+    async def station_begin(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("一站到底只能在群里进行")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._station_games.get(session)
+        if not game:
+            yield event.plain_result("游戏还没发起，请先发送 /发起一站到底。")
+            return
+        if str(game["host"]) != str(event.get_sender_id()):
+            yield event.plain_result("只有发起者可以开始一站到底。")
+            return
+        if game.get("started"):
+            yield event.plain_result("一站到底已经开始了。")
+            return
+        players = game["players"]
+        if len(players) < 2:
+            yield event.plain_result("至少需要两名玩家加入一站到底。")
+            return
+        try:
+            question = await self.service.station_question()
+        except Exception as error:
+            logger.exception("Earth-K 一站到底开始失败")
+            self._station_games.pop(session, None)
+            yield event.plain_result(f"一站到底开始失败：{error}")
+            return
+        game.update({
+            "started": True,
+            "turn": 0,
+            "round": 1,
+            "question": question["question"],
+            "options": question["options"],
+            "answer": question["answer"],
+        })
+        self._schedule_station_timeout(session)
+        yield event.chain_result(self._station_question_chain(game, "一站到底已开始"))
+
+    @filter.command("答")
+    async def station_answer(self, event: AstrMessageEvent, answer: GreedyStr = ""):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("一站到底只能在群里进行")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._station_games.get(session)
+        if not game or not game.get("started"):
+            yield event.plain_result("当前没有进行中的一站到底。")
+            return
+        players = game["players"]
+        current = players[int(game["turn"])]
+        if str(current["id"]) != str(event.get_sender_id()):
+            yield event.plain_result(f"还没轮到你，目前轮到：{current['name']}")
+            return
+        answer = str(answer).strip()
+        if not answer:
+            yield event.plain_result("用法：/答 <答案>")
+            return
+        self._cancel_station_timeout(session)
+        expected = str(game["answer"]).strip()
+        if answer.casefold() == expected.casefold():
+            game["round"] = int(game["round"]) + 1
+            game["turn"] = (int(game["turn"]) + 1) % len(players)
+            try:
+                question = await self.service.station_question()
+            except Exception as error:
+                self._station_games.pop(session, None)
+                yield event.plain_result(f"回答正确，但下一题获取失败，本局结束：{error}")
+                return
+            game.update({
+                "question": question["question"],
+                "options": question["options"],
+                "answer": question["answer"],
+            })
+            self._schedule_station_timeout(session)
+            yield event.chain_result(self._station_question_chain(game, "回答正确"))
+            return
+
+        players.pop(int(game["turn"]))
+        if len(players) <= 1:
+            winner = players[0] if players else None
+            self._station_games.pop(session, None)
+            if winner:
+                yield event.chain_result([
+                    Comp.Plain(text=f"回答错误，答案是“{expected}”。一站到底结束，"),
+                    Comp.At(qq=str(winner["id"])),
+                    Comp.Plain(text=" 是本轮站神！"),
+                ])
+            else:
+                yield event.plain_result(f"回答错误，答案是“{expected}”。一站到底结束。")
+            return
+        game["turn"] = int(game["turn"]) % len(players)
+        try:
+            question = await self.service.station_question()
+        except Exception as error:
+            self._station_games.pop(session, None)
+            yield event.plain_result(f"答错后下一题获取失败，本局结束：{error}")
+            return
+        game.update({
+            "question": question["question"],
+            "options": question["options"],
+            "answer": question["answer"],
+        })
+        self._schedule_station_timeout(session)
+        yield event.chain_result([
+            Comp.Plain(text=f"回答错误，答案是“{expected}”，你被淘汰。\n"),
+            *self._station_question_chain(game, "下一题"),
+        ])
+
+    @filter.command("结束一站到底")
+    async def station_end(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        game = self._station_games.get(session)
+        if not game:
+            yield event.plain_result("当前没有进行中的一站到底。")
+            return
+        if str(game["host"]) != str(event.get_sender_id()):
+            yield event.plain_result("只有发起者可以结束一站到底。")
+            return
+        self._cancel_station_timeout(session)
+        self._station_games.pop(session, None)
+        yield event.plain_result("一站到底已结束。")
+
+    def _station_question_chain(self, game: dict[str, object], prefix: str) -> list[object]:
+        players = game["players"]
+        current = players[int(game["turn"])]
+        options = str(game.get("options") or "")
+        question_text = f"{game['question']}"
+        if options:
+            question_text += f"\n选项：{options}"
+        return [
+            Comp.Plain(text=f"{prefix}，第 {game['round']} 回合。\n"),
+            Comp.At(qq=str(current["id"])),
+            Comp.Plain(text=f" 请作答：\n{question_text}\n（20 秒未作答将被淘汰）"),
+        ]
+
+    def _schedule_station_timeout(self, session: str) -> None:
+        self._cancel_station_timeout(session)
+        self._station_timeout_tasks[session] = asyncio.create_task(self._station_timeout(session))
+
+    def _cancel_station_timeout(self, session: str) -> None:
+        task = self._station_timeout_tasks.pop(session, None)
+        if task:
+            task.cancel()
+
+    async def _station_timeout(self, session: str) -> None:
+        try:
+            await asyncio.sleep(20)
+            game = self._station_games.get(session)
+            if not game or not game.get("started"):
+                return
+            players = game["players"]
+            current = players[int(game["turn"])]
+            expected = str(game["answer"])
+            players.pop(int(game["turn"]))
+            if len(players) <= 1:
+                self._station_games.pop(session, None)
+                if players:
+                    message = MessageChain([
+                        Comp.Plain(text=f"{current['name']} 超时未作答，答案是“{expected}”。一站到底结束，"),
+                        Comp.At(qq=str(players[0]["id"])),
+                        Comp.Plain(text=" 是本轮站神！"),
+                    ])
+                else:
+                    message = MessageChain([Comp.Plain(text=f"{current['name']} 超时未作答，答案是“{expected}”。一站到底结束。")])
+            else:
+                game["turn"] = int(game["turn"]) % len(players)
+                try:
+                    question = await self.service.station_question()
+                    game.update({
+                        "round": int(game["round"]) + 1,
+                        "question": question["question"],
+                        "options": question["options"],
+                        "answer": question["answer"],
+                    })
+                    self._station_timeout_tasks[session] = asyncio.create_task(self._station_timeout(session))
+                    message = MessageChain([
+                        Comp.Plain(text=f"{current['name']} 超时未作答，已被淘汰。\n"),
+                        *self._station_question_chain(game, "下一题"),
+                    ])
+                except Exception as error:
+                    self._station_games.pop(session, None)
+                    message = MessageChain([Comp.Plain(text=f"超时淘汰后下一题获取失败，本局结束：{error}")])
+            await self.context.send_message(session, message)
+        except asyncio.CancelledError:
+            return
+        finally:
+            current_task = self._station_timeout_tasks.get(session)
+            if current_task is asyncio.current_task():
+                self._station_timeout_tasks.pop(session, None)
 
     @filter.command("了解")
     async def character_info(self, event: AstrMessageEvent, character: str = ""):

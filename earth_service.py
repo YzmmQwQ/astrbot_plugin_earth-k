@@ -67,6 +67,11 @@ HELP_GROUPS = [
             ("/开始故事接龙", "房主开始故事接龙"),
             ("/讲述 <内容>", "当前描述者续写故事"),
             ("/结束故事接龙", "房主结束故事接龙"),
+            ("/发起一站到底", "发起群内一站到底"),
+            ("/加入一站到底", "加入当前一站到底"),
+            ("/开始一站到底", "房主开始一站到底"),
+            ("/答 <答案>", "回答当前一站到底题目"),
+            ("/结束一站到底", "房主结束一站到底"),
             ("/了解 <角色>", "发送本地角色资料图"),
             ("/角色语音汇总", "查看可用的原神角色语音"),
             ("/语音 <角色> [编号]", "播放角色中文语音"),
@@ -226,6 +231,32 @@ class EarthService:
         if not available:
             raise RuntimeError("故事接龙关键词库为空")
         return random.choice(available)
+
+    async def station_question(self) -> dict[str, str]:
+        url = "https://xiaoapi.cn/API/game_dati.php?id=1828222534&msg=%E5%BC%80%E5%A7%8B%E6%B8%B8%E6%88%8F"
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        raise RuntimeError(f"HTTP {response.status}")
+                    payload = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as error:
+            raise RuntimeError(f"一站到底题库获取失败：{error}") from error
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise RuntimeError("一站到底题库返回格式错误")
+        question = str(data.get("msg") or "").strip()
+        answer = str(data.get("answer") or "").strip()
+        options = data.get("option")
+        if isinstance(options, list):
+            option_text = "\n".join(str(item).strip() for item in options if str(item).strip())
+        else:
+            option_text = str(options or "").strip()
+        if not question or not answer:
+            raise RuntimeError("一站到底题库没有返回题目或答案")
+        return {"question": question, "options": option_text, "answer": answer}
 
     def story_game_html(
         self,
