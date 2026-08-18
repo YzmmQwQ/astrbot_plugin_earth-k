@@ -37,6 +37,9 @@ class EarthKPlugin(Star):
         self._dice_games: dict[str, dict[str, object]] = {}
         self._voice_games: dict[str, dict[str, object]] = {}
         self._voice_scores: dict[str, dict[str, object]] = {}
+        self._guess_games: dict[str, dict[str, object]] = {}
+        self._guess_scores: dict[str, dict[str, int]] = {}
+        self._guess_names: dict[str, dict[str, str]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -677,6 +680,120 @@ class EarthKPlugin(Star):
             self._memory_scores.pop(key, None)
         self._memory_games.pop(session, None)
         yield event.plain_result("当前会话的记忆力分数已重置")
+
+    @filter.command("猜原神")
+    async def genshin_guess_start(self, event: AstrMessageEvent, payload: str = ""):
+        event.stop_event()
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        if payload.strip():
+            yield event.plain_result("请使用 /猜原神答案 <名称> 作答，/猜原神提示 获取提示。")
+            return
+        if session in self._guess_games:
+            yield event.plain_result("当前已经有一轮猜原神，请先作答或发送 /公布原神答案。")
+            return
+        try:
+            answer, clues = self.service.new_genshin_guess()
+            first = random.randrange(len(clues))
+            clue = clues.pop(first)
+            scores = self._guess_scores.setdefault(session, {})
+            round_number = sum(scores.values()) + 1
+            self._guess_games[session] = {
+                "answer": answer,
+                "clues": clues,
+                "round": round_number,
+            }
+            yield event.plain_result(f"猜原神第 {round_number}/10 回合\n提示：{clue}\n发送 /猜原神答案 <名称> 作答。")
+        except Exception as error:
+            logger.exception("Earth-K 猜原神开始失败")
+            yield event.plain_result(f"猜原神开始失败：{error}")
+
+    @filter.command("猜原神答案")
+    async def genshin_guess_answer(self, event: AstrMessageEvent, answer: str = ""):
+        event.stop_event()
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        game = self._guess_games.get(session)
+        if not game:
+            yield event.plain_result("当前没有进行中的猜原神，请先发送 /猜原神。")
+            return
+        answer = answer.strip()
+        if not answer:
+            yield event.plain_result("用法：/猜原神答案 <名称>")
+            return
+        sender = str(event.get_sender_id())
+        player_name = event.get_sender_name() or sender or "玩家"
+        names = self._guess_names.setdefault(session, {})
+        names[sender] = player_name
+        if not self.service.resolve_genshin_guess(answer, str(game["answer"])):
+            yield event.plain_result("回答不正确，可以继续猜。")
+            return
+
+        scores = self._guess_scores.setdefault(session, {})
+        scores[sender] = scores.get(sender, 0) + 1
+        round_number = int(game["round"])
+        canonical_answer = str(game["answer"])
+        self._guess_games.pop(session, None)
+        ranking = sorted(
+            ((name, scores.get(user_id, 0)) for user_id, name in names.items()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        try:
+            if self.renderer:
+                image = await self.renderer.render(
+                    self.service.genshin_guess_score_html(ranking, round_number),
+                    viewport_width=860,
+                )
+                yield event.image_result(image)
+        except Exception as error:
+            logger.exception("Earth-K 猜原神计分图渲染失败")
+            yield event.plain_result(f"计分图渲染失败：{error}")
+        if round_number >= 10:
+            final = "、".join(f"{name}：{score}分" for name, score in ranking) or "暂无得分"
+            self._guess_scores.pop(session, None)
+            self._guess_names.pop(session, None)
+            yield event.plain_result(f"恭喜答对！答案是：{canonical_answer}\n十回合结束，最终得分：{final}")
+        else:
+            yield event.plain_result(
+                f"恭喜答对！答案是：{canonical_answer}\n"
+                f"发送 /猜原神 开始第 {round_number + 1}/10 回合。"
+            )
+
+    @filter.command("猜原神提示")
+    async def genshin_guess_hint(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        game = self._guess_games.get(session)
+        if not game:
+            yield event.plain_result("当前没有进行中的猜原神，请先发送 /猜原神。")
+            return
+        clues = game["clues"]
+        if not clues:
+            yield event.plain_result("我去，已经没有能提示的了。")
+            return
+        clue = clues.pop(random.randrange(len(clues)))
+        yield event.plain_result(f"提示：{clue}")
+
+    @filter.command("公布原神答案")
+    async def genshin_guess_reveal(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        game = self._guess_games.pop(session, None)
+        if not game:
+            yield event.plain_result("当前没有进行中的猜原神。")
+            return
+        yield event.plain_result(f"答案是：{game['answer']}。本回合结束，请发送 /猜原神 继续。")
+
+    @filter.command("重置原神猜题分数")
+    async def genshin_guess_reset(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.is_admin():
+            yield event.plain_result("该命令仅限管理员使用")
+            return
+        session = str(getattr(event, "unified_msg_origin", "") or event.get_sender_id())
+        self._guess_games.pop(session, None)
+        self._guess_scores.pop(session, None)
+        self._guess_names.pop(session, None)
+        yield event.plain_result("当前会话的猜原神分数已重置")
 
     @filter.command("土块渲染测试")
     async def render_test(self, event: AstrMessageEvent):

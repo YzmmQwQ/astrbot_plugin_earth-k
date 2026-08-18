@@ -60,6 +60,11 @@ HELP_GROUPS = [
             ("/重置语音分数", "管理员重置当前会话猜语音分数"),
             ("/原史 <名称>", "查询原神角色、武器、圣遗物等资料"),
             ("/原史目录 <分类>", "查看原神资料分类目录"),
+            ("/猜原神", "开始一轮本地题库猜原神"),
+            ("/猜原神答案 <名称>", "回答当前猜原神题目"),
+            ("/猜原神提示", "获取当前猜原神提示"),
+            ("/公布原神答案", "公布答案并结束当前回合"),
+            ("/重置原神猜题分数", "仅管理员可用，重置当前会话分数"),
             ("/大话骰规则", "发送大话骰规则图"),
             ("/发起大话骰", "在当前群聊发起一局大话骰"),
             ("/加入大话骰", "加入当前会话的大话骰"),
@@ -82,8 +87,8 @@ HELP_GROUPS = [
     (
         "迁移中的功能",
         [
-            ("点歌、视频、小说、漫画", "正在替换 Yunzai 网络接口和消息段"),
-            ("猜原神、群小游戏", "正在迁移会话状态和群消息流程"),
+            ("点歌、视频、小说、漫画", "正在迁移网络接口和消息发送"),
+            ("群小游戏", "正在迁移会话状态和群消息流程"),
             ("角色语音、角色视频", "正在迁移数据接口和消息发送"),
             ("AI 绘图", "单独评估配置、审核和外部服务，不随本批启用"),
         ],
@@ -115,6 +120,7 @@ class EarthService:
         self._meme_keywords: dict[str, dict[str, object]] = {}
         self._genshin_catalog: list[dict[str, object]] = []
         self._genshin_catalog_at = 0.0
+        self._guess_aliases: dict[str, list[str]] = {}
         meme_file = self.resources / "bq.json"
         if meme_file.is_file():
             try:
@@ -124,6 +130,18 @@ class EarthService:
                         continue
                     for keyword in item.get("keywords", []):
                         self._meme_keywords[str(keyword)] = item
+            except (OSError, json.JSONDecodeError):
+                pass
+        guess_alias_file = self.resources / "json" / "mohu" / "mohu.json"
+        if guess_alias_file.is_file():
+            try:
+                aliases = json.loads(guess_alias_file.read_text(encoding="utf-8"))
+                if isinstance(aliases, dict):
+                    self._guess_aliases = {
+                        str(name): [str(alias) for alias in values if str(alias).strip()]
+                        for name, values in aliases.items()
+                        if isinstance(values, list)
+                    }
             except (OSError, json.JSONDecodeError):
                 pass
 
@@ -136,6 +154,60 @@ class EarthService:
                     version = line.lstrip("# ").strip()
                     break
         return f"Earth-K AstrBot 迁移版\n当前版本：{version}\n迁移状态：基础框架与本地 HTML 渲染已完成"
+
+    @staticmethod
+    def _guess_normalize(value: str) -> str:
+        return re.sub(r"[\s·・「」【】『』（）()、,，.!！？:：\-_]", "", value).casefold()
+
+    def new_genshin_guess(self) -> tuple[str, list[str]]:
+        """Choose a local clue file and return its answer and remaining clues."""
+        directory = self.resources / "txt" / "GuessGenshin"
+        files = sorted(directory.glob("*.txt"))
+        if not files:
+            raise RuntimeError("猜原神题库为空")
+        selected = random.choice(files)
+        clues = [
+            clue.replace("\\r", "").replace("\\n", "").replace("\r", "").replace("\n", "").strip()
+            for clue in selected.read_text(encoding="utf-8", errors="ignore").split(",")
+        ]
+        clues = [clue for clue in clues if clue]
+        if not clues:
+            raise RuntimeError(f"题目“{selected.stem}”没有可用提示")
+        return selected.stem, clues
+
+    def resolve_genshin_guess(self, query: str, answer: str) -> bool:
+        """Match the answer name or one of the legacy local aliases."""
+        needle = self._guess_normalize(query)
+        canonical = self._guess_normalize(answer)
+        if not needle:
+            return False
+        if needle == canonical:
+            return True
+        return any(
+            self._guess_normalize(alias) == needle
+            for alias in self._guess_aliases.get(answer, [])
+        )
+
+    def genshin_guess_score_html(
+        self,
+        players: list[tuple[str, int]],
+        round_number: int,
+    ) -> str:
+        css_path = self.resources / "html" / "GenshinSpeak" / "index.css"
+        renderer = EarthRenderer(Path("."))
+        css = renderer.inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        rows = "".join(
+            f"<td>{html.escape(name)}-</td><td>{score}</td><tr>"
+            for name, score in players
+        )
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+</style></head><body>
+<div class="bt">第{round_number}回合</div>
+<p class="nr">共十回合</p>
+<div class="zhu"><table class="bg" border="0" width="650"><tbody>{rows}</tbody></table></div>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p>
+</body></html>'''
 
     async def genshin_history_catalog(self, force: bool = False) -> list[dict[str, object]]:
         """Fetch the current HoYoWiki directories used by the old 原史 command."""
@@ -878,7 +950,7 @@ body {{ background-image:url("{background}"); }}
             ],
             "disks": disks,
             "other": [("系统", platform.platform()), ("网络", network_text), ("插件", f"{plugin_count} 个 AstrBot 插件")],
-            "host": [f"运行目录：{self.plugin_dir.parent}", f"解释器：{sys.executable}", "旧版 Yunzai Redis/Bot 数据：AstrBot 不提供，已移除"],
+            "host": [f"运行目录：{self.plugin_dir.parent}", f"解释器：{sys.executable}", "旧版运行时数据：AstrBot 不提供，已移除"],
         }
 
     def _fallback_metrics(self, now: float) -> dict[str, object]:
