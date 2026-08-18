@@ -48,6 +48,9 @@ GENSHIN_VIDEO_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
     "Referer": "https://ys.mihoyo.com/",
 }
+AFDIAN_API = "https://afdian.net/api/creator/get-sponsors"
+AFDIAN_USER_ID = "f2ae58dcb94f11ec9f6852540025c377"
+AFDIAN_HEADERS = {"User-Agent": "Mozilla/5.0 Earth-K AstrBot Plugin"}
 
 
 HELP_GROUPS = [
@@ -117,6 +120,8 @@ HELP_GROUPS = [
             ("/叫骰 <数量> <点数>", "进行大话骰叫骰"),
             ("/开蛊", "揭示骰子并结算本轮"),
             ("/结束大话骰", "房主结束游戏"),
+            ("/土块发电榜、/发电榜", "查看发电排行"),
+            ("/最近发电", "查看最近发电支持者"),
             ("/土块状态", "查看 AstrBot 宿主进程和系统状态图"),
             ("/弹琴帮助", "查看音频演奏迁移说明"),
             ("/钢琴 <音符>", "使用本地音色演奏，其他乐器命令同理"),
@@ -425,6 +430,113 @@ class EarthService:
 <div class="zhu"><table class="bg" border="0" width="650"><tbody>{rows}</tbody></table></div>
 <p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p>
 </body></html>'''
+
+    def donate_rank_html(
+        self,
+        sponsors: list[dict[str, str]],
+        mode: str,
+        limit_top: int,
+    ) -> str:
+        css_path = self.resources / "html" / "fdrank" / "fdrank.css"
+        css = EarthRenderer(Path(".")).inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        background = self._asset_uri(self.resources / "common" / "bg" / "bg-geo.jpg")
+        header_logo = self._asset_uri(self.resources / "img" / "rank" / "top.png")
+        medals = [
+            self._asset_uri(self.resources / "img" / "rank" / f"top{index}.png")
+            for index in range(3)
+        ]
+        rows = []
+        for index, sponsor in enumerate(sponsors[:limit_top]):
+            medal = medals[index] if index < 3 else ""
+            medal_html = (
+                f'<img class="icon" src="{medal}" />'
+                if medal
+                else f'<span class="rank-number">{index + 1}</span>'
+            )
+            avatar = html.escape(str(sponsor.get("avatar") or ""), quote=True)
+            avatar_html = (
+                f'<img class="icon" src="{avatar}" />'
+                if avatar
+                else '<span class="avatar-fallback">?</span>'
+            )
+            rows.append(
+                f'<div class="item"><div class="image">{medal_html}</div>'
+                f'<div class="avatar">{avatar_html}</div>'
+                f'<div class="title">{html.escape(str(sponsor["name"]))}</div></div>'
+            )
+        title = "土块插件-最近发电" if mode == "recent" else "土块插件-发电榜"
+        subtitle = "最近发电" if mode == "recent" else "发电排行"
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+@font-face {{ font-family: "tttgbnumber"; src: url("{self._asset_uri(self.resources / "font" / "tttgbnumber.ttf")}"); }}
+.container {{ background-image: url("{background}"); }}
+.head_box .genshin_logo {{ content: url("{header_logo}"); }}
+.rank-number {{ color: #d3bc8e; font-size: 20px; width: 32px; text-align: center; }}
+.avatar-fallback {{ width: 20px; height: 20px; border: 1px solid #e6d9be; border-radius: 50%; color: #e6d9be; text-align: center; line-height: 18px; }}
+.logo::after {{ content: "Created By AstrBot & Earth-K-Plugin"; }}
+.logo {{ font-size: 0; }}
+</style></head><body><div class="container" id="container">
+<div class="head_box"><h1 class="id_text">{title}</h1><h1 class="day_text">{subtitle} - Top{limit_top}</h1><img class="genshin_logo" src="{header_logo}" /></div>
+<div class="list">{"".join(rows) or '<div class="empty">暂无发电记录</div>'}</div>
+<div class="logo"></div></div></body></html>'''
+
+    async def donate_sponsors(self, recent: bool = False) -> list[dict[str, str]]:
+        """Fetch public sponsor data used by the original donation ranking."""
+        pages = [1] if recent else [1, 2]
+        sponsor_type = "new" if recent else "amount"
+        sponsors: list[dict[str, str]] = []
+        timeout = aiohttp.ClientTimeout(total=15)
+        try:
+            async with aiohttp.ClientSession(headers=AFDIAN_HEADERS, timeout=timeout) as session:
+                for page in pages:
+                    async with session.get(
+                        AFDIAN_API,
+                        params={"user_id": AFDIAN_USER_ID, "type": sponsor_type, "page": page},
+                    ) as response:
+                        if response.status != 200:
+                            raise RuntimeError(f"HTTP {response.status}")
+                        payload = await response.json(content_type=None)
+                    if not isinstance(payload, dict):
+                        raise RuntimeError("接口返回格式错误")
+                    error_code = payload.get("ec", payload.get("code", 0))
+                    if str(error_code) not in {"0", "200"}:
+                        raise RuntimeError(str(payload.get("em") or payload.get("message") or "接口返回错误"))
+                    data = payload.get("data")
+                    items = data.get("list") if isinstance(data, dict) else None
+                    if not isinstance(items, list):
+                        raise RuntimeError("接口没有返回赞助者列表")
+                    sponsors.extend(self._normalize_sponsor(item) for item in items if isinstance(item, dict))
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as error:
+            raise RuntimeError(f"爱发电数据获取失败：{error}") from error
+        return [sponsor for sponsor in sponsors if sponsor["name"]]
+
+    @staticmethod
+    def _normalize_sponsor(item: dict[str, object]) -> dict[str, str]:
+        user = item.get("user")
+        user_data = user if isinstance(user, dict) else {}
+        name = next(
+            (
+                str(value).strip()
+                for value in (
+                    item.get("name"),
+                    item.get("user_name"),
+                    item.get("nickname"),
+                    user_data.get("name"),
+                    user_data.get("nickname"),
+                )
+                if value is not None and str(value).strip()
+            ),
+            "匿名支持者",
+        )
+        avatar = next(
+            (
+                str(value).strip()
+                for value in (item.get("avatar"), user_data.get("avatar"), user_data.get("avatar_url"))
+                if value is not None and str(value).strip()
+            ),
+            "",
+        )
+        return {"name": name, "avatar": avatar}
 
     @staticmethod
     def _guess_normalize(value: str) -> str:

@@ -1852,6 +1852,41 @@ class EarthKPlugin(Star):
             logger.exception("Earth-K 状态页渲染失败")
             yield event.plain_result(f"状态页渲染失败：{error}")
 
+    @filter.command("发电榜")
+    @filter.command("土块发电榜")
+    async def donate_rank(self, event: AstrMessageEvent):
+        event.stop_event()
+        async for result in self._donate_rank_result(event, recent=False):
+            yield result
+
+    @filter.command("最近发电")
+    async def recent_donate(self, event: AstrMessageEvent):
+        event.stop_event()
+        async for result in self._donate_rank_result(event, recent=True):
+            yield result
+
+    async def _donate_rank_result(self, event: AstrMessageEvent, recent: bool):
+        try:
+            sponsors = await self.service.donate_sponsors(recent=recent)
+            if not sponsors:
+                yield event.plain_result("暂时没有发电记录。")
+                return
+            if not self.renderer:
+                title = "最近发电" if recent else "发电榜"
+                yield event.plain_result(f"{title}：\n" + "\n".join(
+                    f"{index}. {item['name']}" for index, item in enumerate(sponsors[:10], 1)
+                ))
+                return
+            html_page = self.service.donate_rank_html(
+                sponsors,
+                "recent" if recent else "rank",
+                10 if recent else 20,
+            )
+            yield event.image_result(await self.renderer.render(html_page, viewport_width=1000))
+        except Exception as error:
+            logger.exception("Earth-K 发电榜获取失败")
+            yield event.plain_result(f"发电榜获取失败：{error}")
+
     @filter.command("卜卦")
     async def divination(self, event: AstrMessageEvent):
         event.stop_event()
