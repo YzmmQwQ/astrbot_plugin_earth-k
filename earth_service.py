@@ -62,6 +62,11 @@ HELP_GROUPS = [
             ("/猜测 <答案>", "猜测当前你说我猜题词"),
             ("/写答案 <答案>", "当前描述者自定义答案"),
             ("/结束你说我猜", "发起者结束游戏"),
+            ("/发起故事接龙", "发起群内故事接龙"),
+            ("/加入故事接龙", "加入当前故事接龙"),
+            ("/开始故事接龙", "房主开始故事接龙"),
+            ("/讲述 <内容>", "当前描述者续写故事"),
+            ("/结束故事接龙", "房主结束故事接龙"),
             ("/了解 <角色>", "发送本地角色资料图"),
             ("/角色语音汇总", "查看可用的原神角色语音"),
             ("/语音 <角色> [编号]", "播放角色中文语音"),
@@ -99,7 +104,6 @@ HELP_GROUPS = [
         "迁移中的功能",
         [
             ("点歌、视频、小说、漫画", "正在迁移网络接口和消息发送"),
-            ("群小游戏", "正在迁移会话状态和群消息流程"),
             ("角色语音、角色视频", "正在迁移数据接口和消息发送"),
             ("AI 绘图", "单独评估配置、审核和外部服务，不随本批启用"),
         ],
@@ -134,6 +138,7 @@ class EarthService:
         self._guess_aliases: dict[str, list[str]] = {}
         self._iq_questions: list[str] = []
         self._you_say_words: list[str] = []
+        self._story_keywords: list[str] = []
         meme_file = self.resources / "bq.json"
         if meme_file.is_file():
             try:
@@ -165,6 +170,16 @@ class EarthService:
                 if isinstance(words, list):
                     self._you_say_words = [
                         str(word).strip() for word in words if str(word).strip()
+                    ]
+            except (OSError, json.JSONDecodeError):
+                pass
+        story_keywords_file = self.resources / "json" / "story_succession" / "keywords.json"
+        if story_keywords_file.is_file():
+            try:
+                keywords = json.loads(story_keywords_file.read_text(encoding="utf-8"))
+                if isinstance(keywords, list):
+                    self._story_keywords = [
+                        str(keyword).strip() for keyword in keywords if str(keyword).strip()
                     ]
             except (OSError, json.JSONDecodeError):
                 pass
@@ -203,6 +218,43 @@ class EarthService:
         if not available:
             raise RuntimeError("你说我猜词库为空")
         return random.choice(available)
+
+    def random_story_keyword(self, used: set[str]) -> str:
+        available = [keyword for keyword in self._story_keywords if keyword not in used]
+        if not available:
+            available = self._story_keywords
+        if not available:
+            raise RuntimeError("故事接龙关键词库为空")
+        return random.choice(available)
+
+    def story_game_html(
+        self,
+        history: list[dict[str, object]],
+        turn: int,
+        total_turns: int,
+        theme: str,
+    ) -> str:
+        css_path = self.resources / "html" / "StorySuccession" / "index.css"
+        renderer = EarthRenderer(Path("."))
+        css = renderer.inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        entries = "".join(
+            f'<div class="nr3">{html.escape(str(item["name"]))}--关键词：'
+            f'{html.escape(str(item["keyword"]))}</div>'
+            f'<div class="nr4">{html.escape(str(item["content"]))}</div>'
+            for item in history
+        )
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+{css}
+.zhu {{ width: 100%; height: auto; display: block; }}
+.nr3 {{ display: block; margin-top: 18px; }}
+.nr4 {{ white-space: pre-wrap; word-break: break-word; }}
+</style></head><body>
+<div class="bt">第{turn}回合</div>
+<p class="nr">共{total_turns}回合</p>
+<div class="nr4">主题：{html.escape(theme)}</div>
+<div class="zhu">{entries}</div>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p>
+</body></html>'''
 
     def group_game_score_html(
         self,

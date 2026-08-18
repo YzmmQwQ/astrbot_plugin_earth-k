@@ -11,6 +11,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.star.filter.command import GreedyStr
 
 from .earth_renderer import EarthRenderer
 from .earth_service import HELP_GROUPS, EarthService
@@ -43,6 +44,7 @@ class EarthKPlugin(Star):
         self._hit_games: dict[str, dict[str, str]] = {}
         self._hit_timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._you_say_games: dict[str, dict[str, object]] = {}
+        self._story_games: dict[str, dict[str, object]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -61,6 +63,7 @@ class EarthKPlugin(Star):
         self._hit_timeout_tasks.clear()
         self._hit_games.clear()
         self._you_say_games.clear()
+        self._story_games.clear()
         if self.renderer:
             await self.renderer.stop()
 
@@ -457,6 +460,170 @@ class EarthKPlugin(Star):
         except Exception as error:
             logger.error(f"Earth-K 你说我猜私聊题词失败: {error}")
             return False
+
+    @filter.command("发起故事接龙")
+    async def story_start(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("故事接龙只能在群里发起")
+            return
+        session = str(event.unified_msg_origin)
+        if session in self._story_games:
+            yield event.plain_result("当前群已经发起过故事接龙了。")
+            return
+        user_id = str(event.get_sender_id())
+        self._story_games[session] = {
+            "host": user_id,
+            "players": [{"id": user_id, "name": event.get_sender_name() or user_id}],
+            "started": False,
+        }
+        yield event.plain_result("故事接龙已发起，发起者已加入，发送 /加入故事接龙 报名。")
+
+    @filter.command("加入故事接龙")
+    async def story_join(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("故事接龙只能在群里加入")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._story_games.get(session)
+        if not game:
+            yield event.plain_result("游戏还没发起，请先发送 /发起故事接龙。")
+            return
+        if game.get("started"):
+            yield event.plain_result("故事接龙已经开始，不能再加入。")
+            return
+        user_id = str(event.get_sender_id())
+        players = game["players"]
+        if any(str(player["id"]) == user_id for player in players):
+            yield event.plain_result("你已经加入故事接龙了！")
+            return
+        players.append({"id": user_id, "name": event.get_sender_name() or user_id})
+        yield event.chain_result([
+            Comp.At(qq=user_id),
+            Comp.Plain(text=f"加入故事接龙成功，当前人数 {len(players)} 人。"),
+        ])
+
+    @filter.command("开始故事接龙")
+    async def story_begin(self, event: AstrMessageEvent):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("故事接龙只能在群里进行")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._story_games.get(session)
+        if not game:
+            yield event.plain_result("游戏还没发起，请先发送 /发起故事接龙。")
+            return
+        if str(game["host"]) != str(event.get_sender_id()):
+            yield event.plain_result("只有发起者可以开始故事接龙。")
+            return
+        if game.get("started"):
+            yield event.plain_result("故事接龙已经开始了。")
+            return
+        players = game["players"]
+        if len(players) < 2:
+            yield event.plain_result("至少需要两名玩家加入故事接龙。")
+            return
+        try:
+            keyword = self.service.random_story_keyword(set())
+        except Exception as error:
+            logger.exception("Earth-K 故事接龙关键词获取失败")
+            yield event.plain_result(f"故事接龙开始失败：{error}")
+            return
+        game.update({
+            "started": True,
+            "turn": 0,
+            "turn_count": 0,
+            "total_turns": len(players) * 2,
+            "used_keywords": {keyword},
+            "keyword": keyword,
+            "history": [],
+        })
+        current = players[0]
+        yield event.chain_result([
+            Comp.Plain(text=f"故事接龙已开始，共 {game['total_turns']} 回合。\n"),
+            Comp.At(qq=str(current["id"])),
+            Comp.Plain(text=f" 请围绕关键词“{keyword}”描述故事开头。\n发送 /讲述 <内容> 续写。"),
+        ])
+
+    @filter.command("讲述")
+    async def story_tell(self, event: AstrMessageEvent, content: GreedyStr = ""):
+        event.stop_event()
+        if not event.get_group_id():
+            yield event.plain_result("故事接龙只能在群里进行")
+            return
+        session = str(event.unified_msg_origin)
+        game = self._story_games.get(session)
+        if not game or not game.get("started"):
+            yield event.plain_result("当前没有进行中的故事接龙，请先发起并开始游戏。")
+            return
+        players = game["players"]
+        current = players[int(game["turn"])]
+        if str(current["id"]) != str(event.get_sender_id()):
+            yield event.plain_result(f"还没轮到你，目前轮到：{current['name']}")
+            return
+        text = str(content).strip()
+        if not text:
+            yield event.plain_result("用法：/讲述 <故事内容>")
+            return
+
+        history = game["history"]
+        history.append({
+            "name": current["name"],
+            "keyword": game["keyword"],
+            "content": text,
+        })
+        game["turn_count"] = int(game["turn_count"]) + 1
+        turn_count = int(game["turn_count"])
+        total_turns = int(game["total_turns"])
+        try:
+            if self.renderer:
+                image = await self.renderer.render(
+                    self.service.story_game_html(history, turn_count, total_turns, "故事接龙"),
+                    viewport_width=1100,
+                )
+                yield event.image_result(image)
+        except Exception as error:
+            logger.exception("Earth-K 故事接龙过程图渲染失败")
+            yield event.plain_result(f"故事已记录，但过程图渲染失败：{error}")
+
+        if turn_count >= total_turns:
+            self._story_games.pop(session, None)
+            yield event.plain_result("故事接龙游戏结束，以上为最终故事。")
+            return
+
+        game["turn"] = (int(game["turn"]) + 1) % len(players)
+        try:
+            used_keywords = game["used_keywords"]
+            keyword = self.service.random_story_keyword(used_keywords)
+            used_keywords.add(keyword)
+            game["keyword"] = keyword
+        except Exception as error:
+            self._story_games.pop(session, None)
+            logger.exception("Earth-K 故事接龙下一关键词获取失败")
+            yield event.plain_result(f"故事接龙已结束，下一关键词获取失败：{error}")
+            return
+        next_player = players[int(game["turn"])]
+        yield event.chain_result([
+            Comp.Plain(text="本回合描述完毕，下一位："),
+            Comp.At(qq=str(next_player["id"])),
+            Comp.Plain(text=f"\n当前关键词：“{keyword}”\n请发送 /讲述 <内容>。"),
+        ])
+
+    @filter.command("结束故事接龙")
+    async def story_end(self, event: AstrMessageEvent):
+        event.stop_event()
+        session = str(event.unified_msg_origin)
+        game = self._story_games.get(session)
+        if not game:
+            yield event.plain_result("当前没有进行中的故事接龙。")
+            return
+        if str(game["host"]) != str(event.get_sender_id()):
+            yield event.plain_result("只有发起者可以结束故事接龙。")
+            return
+        self._story_games.pop(session, None)
+        yield event.plain_result("故事接龙已结束。")
 
     @filter.command("了解")
     async def character_info(self, event: AstrMessageEvent, character: str = ""):
