@@ -25,6 +25,25 @@ except ImportError:  # pragma: no cover - requirements installs psutil in AstrBo
 from .earth_renderer import EarthRenderer
 
 
+HOYOWIKI_API = "https://sg-wiki-api.hoyolab.com/hoyowiki/wapi"
+HOYOWIKI_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/102 Safari/537.36",
+    "Referer": "https://wiki.hoyolab.com",
+    "x-rpc-language": "zh-cn",
+}
+HOYOWIKI_MENUS = {
+    "角色": "2",
+    "武器": "4",
+    "圣遗物": "5",
+    "敌人": "7",
+    "物产": "9",
+    "NPC": "10",
+    "书籍": "12",
+    "教程": "14",
+    "动物": "15",
+}
+
+
 HELP_GROUPS = [
     (
         "已迁移功能",
@@ -33,6 +52,8 @@ HELP_GROUPS = [
             ("/练习记忆力", "观察数字卡后，用 /我猜 <字母> 作答"),
             ("/今日运势", "查看今日运势"),
             ("/了解 <角色>", "发送本地角色资料图"),
+            ("/原史 <名称>", "查询原神角色、武器、圣遗物等资料"),
+            ("/原史目录 <分类>", "查看原神资料分类目录"),
             ("/大话骰规则", "发送大话骰规则图"),
             ("/发起大话骰", "在当前群聊发起一局大话骰"),
             ("/加入大话骰", "加入当前会话的大话骰"),
@@ -57,7 +78,7 @@ HELP_GROUPS = [
         [
             ("点歌、视频、小说、漫画", "正在替换 Yunzai 网络接口和消息段"),
             ("猜原神、猜语音、群小游戏", "正在迁移会话状态和群消息流程"),
-            ("原史、角色资料、角色视频", "正在迁移数据接口和原有 HTML 模板"),
+            ("角色语音、角色视频", "正在迁移数据接口和消息发送"),
             ("AI 绘图", "单独评估配置、审核和外部服务，不随本批启用"),
         ],
     ),
@@ -86,6 +107,8 @@ class EarthService:
         self.resources = plugin_dir / "resources"
         self.meme_url = "https://h.winterqkl.cn/memes/"
         self._meme_keywords: dict[str, dict[str, object]] = {}
+        self._genshin_catalog: list[dict[str, object]] = []
+        self._genshin_catalog_at = 0.0
         meme_file = self.resources / "bq.json"
         if meme_file.is_file():
             try:
@@ -107,6 +130,269 @@ class EarthService:
                     version = line.lstrip("# ").strip()
                     break
         return f"Earth-K AstrBot 迁移版\n当前版本：{version}\n迁移状态：基础框架与本地 HTML 渲染已完成"
+
+    async def genshin_history_catalog(self, force: bool = False) -> list[dict[str, object]]:
+        """Fetch the current HoYoWiki directories used by the old 原史 command."""
+        if self._genshin_catalog and not force and time.monotonic() - self._genshin_catalog_at < 600:
+            return self._genshin_catalog
+
+        entries: list[dict[str, object]] = []
+        try:
+            for category, menu_id in HOYOWIKI_MENUS.items():
+                page_num = 1
+                total = None
+                while total is None or len([item for item in entries if item["category"] == category]) < total:
+                    payload = await self._hoyowiki_json(
+                        "POST",
+                        "/get_entry_page_list",
+                        json_body={
+                            "filters": [],
+                            "menu_id": menu_id,
+                            "page_num": page_num,
+                            "page_size": 30,
+                            "use_es": True,
+                        },
+                    )
+                    data = ((payload.get("data") or {}) if isinstance(payload, dict) else {})
+                    items = data.get("list") or []
+                    total = int(data.get("total") or 0)
+                    if not items:
+                        break
+                    for item in items:
+                        if not isinstance(item, dict) or not item.get("entry_page_id") or not item.get("name"):
+                            continue
+                        entries.append({
+                            "id": len(entries) + 1,
+                            "category": category,
+                            "content_id": str(item["entry_page_id"]),
+                            "title": str(item["name"]).strip(),
+                            "summary": str(item.get("desc") or "").strip(),
+                            "icon": str(item.get("icon_url") or "").strip(),
+                            "alias": "",
+                        })
+                    page_num += 1
+                    if page_num > 100:
+                        break
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, ValueError, RuntimeError) as error:
+            raise RuntimeError(f"原神资料目录获取失败：{error}") from error
+        if not entries:
+            raise RuntimeError("原神资料目录为空")
+        self._genshin_catalog = entries
+        self._genshin_catalog_at = time.monotonic()
+        return entries
+
+    async def _hoyowiki_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, object] | None = None,
+        json_body: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(headers=HOYOWIKI_HEADERS, timeout=timeout) as session:
+            async with session.request(
+                method,
+                f"{HOYOWIKI_API}{path}",
+                params=params,
+                json=json_body,
+            ) as response:
+                response.raise_for_status()
+                payload = await response.json(content_type=None)
+        if not isinstance(payload, dict) or payload.get("retcode") != 0:
+            message = payload.get("message") if isinstance(payload, dict) else "返回格式错误"
+            raise RuntimeError(str(message))
+        return payload
+
+    @staticmethod
+    def _history_normalize(value: str) -> str:
+        return re.sub(r"[\s·・「」【】『』（）()、,，.!！？:：\-]", "", value).casefold()
+
+    async def genshin_history_find(self, query: str) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+        entries = self._genshin_catalog
+        if not entries:
+            try:
+                payload = await self._hoyowiki_json("GET", "/search", params={"keyword": query})
+                search_items = ((payload.get("data") or {}).get("list") or [])
+                entries = [
+                    self._hoyowiki_search_entry(item)
+                    for item in search_items
+                    if isinstance(item, dict) and self._hoyowiki_search_category(item)
+                ]
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError):
+                entries = await self.genshin_history_catalog()
+        needle = self._history_normalize(query)
+        exact = [
+            item for item in entries
+            if needle and needle in {
+                self._history_normalize(str(item.get("title") or "")),
+                self._history_normalize(str(item.get("alias") or "")),
+            }
+        ]
+        if len(exact) == 1:
+            return exact[0], exact
+        if len(exact) > 1:
+            return None, exact
+        partial = [
+            item for item in entries
+            if needle and needle in self._history_normalize(str(item.get("title") or ""))
+        ]
+        return (partial[0] if len(partial) == 1 else None), partial
+
+    @staticmethod
+    def _hoyowiki_search_category(item: dict[str, object]) -> str:
+        menu = item.get("menu")
+        if not isinstance(menu, dict):
+            return ""
+        submenu_items = menu.get("sub_menus") or []
+        for submenu in submenu_items:
+            if isinstance(submenu, dict):
+                submenu_id = str(submenu.get("id") or "")
+                for category, menu_id in HOYOWIKI_MENUS.items():
+                    if submenu_id == menu_id:
+                        return category
+        return ""
+
+    @classmethod
+    def _hoyowiki_search_entry(cls, item: dict[str, object]) -> dict[str, object]:
+        return {
+            "id": str(item.get("entry_page_id") or ""),
+            "category": cls._hoyowiki_search_category(item),
+            "content_id": str(item.get("entry_page_id") or ""),
+            "title": str(item.get("name") or "").strip(),
+            "summary": str(item.get("desc") or "").strip(),
+            "icon": str(item.get("icon_url") or "").strip(),
+            "alias": "",
+        }
+
+    async def genshin_history_detail(self, entry: dict[str, object]) -> dict[str, object]:
+        """Read a Wiki article and return safe text/image data for the local renderer."""
+        title = str(entry.get("title") or "未知条目")
+        summary = str(entry.get("summary") or "").strip()
+        image = str(entry.get("icon") or "").strip()
+        try:
+            payload = await self._hoyowiki_json(
+                "GET",
+                "/entry_page",
+                params={"entry_page_id": str(entry.get("content_id") or "")},
+            )
+            body, article_image = self._history_content_text(payload)
+            image = article_image or image
+            warning = ""
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RuntimeError) as error:
+            warning = "正文接口暂时不可用"
+            body = summary
+            if not body:
+                body = "当前只能获取到目录信息，请稍后重试。"
+            body += f"\n\n（{warning}）"
+        image = await self._history_image_uri(image)
+        return {"title": title, "body": body or summary or "暂无资料正文。", "image": image, "warning": warning}
+
+    @staticmethod
+    def _history_content_text(payload: object) -> tuple[str, str]:
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+            return "", ""
+        page = (payload["data"].get("page") or {})
+        if not isinstance(page, dict):
+            return "", ""
+        sections: list[tuple[str, str]] = []
+        modules = page.get("modules") or []
+        preferred_modules = {"故事", "背景故事", "更多信息", "资料", "简介"}
+
+        def collect_sections(value: object) -> None:
+            if isinstance(value, dict):
+                title = value.get("title")
+                desc = value.get("desc")
+                if isinstance(title, str) and isinstance(desc, str) and desc.strip():
+                    sections.append((title.strip(), desc.strip()))
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        collect_sections(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_sections(child)
+
+        for module in modules:
+            if not isinstance(module, dict):
+                continue
+            if str(module.get("name") or "") not in preferred_modules:
+                continue
+            for component in module.get("components") or []:
+                if not isinstance(component, dict):
+                    continue
+                raw_data = component.get("data")
+                if not isinstance(raw_data, str) or not raw_data.strip():
+                    continue
+                try:
+                    collect_sections(json.loads(raw_data))
+                except json.JSONDecodeError:
+                    continue
+
+        if not sections:
+            desc = str(page.get("desc") or "").strip()
+            if desc:
+                sections.append(("简介", desc))
+        text = "\n\n".join(
+            f"【{title}】\n{EarthService._history_strip_html(desc)}"
+            for title, desc in sections
+        )
+        return text, str(page.get("icon_url") or "")
+
+    @staticmethod
+    def _history_strip_html(value: str) -> str:
+        value = html.unescape(value).replace("\\u003c", "<").replace("\\u003e", ">")
+        value = re.sub(r"<(br|p|div|li|h[1-6])[^>]*>", "\n", value, flags=re.IGNORECASE)
+        value = re.sub(r"<[^>]+>", "", value)
+        value = html.unescape(value)
+        value = re.sub(r"[ \t]+", " ", value)
+        return re.sub(r"\n{3,}", "\n\n", value).strip()
+
+    async def _history_image_uri(self, image: str) -> str:
+        if not image or image.startswith("data:"):
+            return image
+        try:
+            timeout = aiohttp.ClientTimeout(total=12)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(image) as response:
+                    if response.status == 200:
+                        content_type = response.headers.get("Content-Type", "image/png").split(";")[0]
+                        payload = await response.read()
+                        return f"data:{content_type};base64,{base64.b64encode(payload).decode('ascii')}"
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+        return image
+
+    def genshin_history_directory_html(self, category: str, entries: list[dict[str, object]]) -> str:
+        css_path = self.resources / "html" / "GenshinHistory" / "ml.css"
+        css = EarthRenderer(Path(".")).inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        rows = []
+        for index, item in enumerate(entries, 1):
+            rows.append(
+                f'<tr><td class="id">{index}</td><td class="rw">'
+                f'{html.escape(str(item.get("title") or ""))}'
+                f'<small>#{item.get("id", "")}</small></td></tr>'
+            )
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>{css}
+small {{ margin-left: 12px; opacity: .65; font-size: 14px; }}</style></head><body>
+<div class="kqtp"><div class="bt">原 史 目 录 · {html.escape(category)}</div></div>
+<table class="bg1"><tbody>{"".join(rows)}</tbody></table>
+<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p></body></html>'''
+
+    def genshin_history_article_html(self, detail: dict[str, object]) -> str:
+        css_path = self.resources / "html" / "GenshinHistory" / "gs.css"
+        css = EarthRenderer(Path(".")).inline_css(css_path.read_text(encoding="utf-8"), css_path)
+        image = str(detail.get("image") or "")
+        image_html = f'<img class="history-image" src="{html.escape(image, quote=True)}" />' if image else ""
+        paragraphs = "".join(
+            f'<div class="lb">{html.escape(line)}</div>'
+            for line in str(detail.get("body") or "暂无资料正文。" ).splitlines()
+            if line.strip()
+        )
+        return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>{css}
+.history-image {{ max-width: 60%; max-height: 520px; object-fit: contain; }}
+.lb {{ white-space: pre-wrap; }}
+</style></head><body><div class="kqtp">{image_html}<div>{html.escape(str(detail.get("title") or "未知条目"))}</div></div>
+{paragraphs}<p class="jw">Created By AstrBot &amp; Earth-K-Plugin</p></body></html>'''
 
     @staticmethod
     def piano_help_text() -> str:

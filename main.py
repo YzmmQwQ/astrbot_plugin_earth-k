@@ -117,6 +117,56 @@ class EarthKPlugin(Star):
             return
         yield event.image_result(str(image))
 
+    @filter.command("原史目录")
+    async def genshin_history_directory(self, event: AstrMessageEvent, category: str = ""):
+        event.stop_event()
+        if not self.renderer:
+            yield event.plain_result("本地 HTML 渲染器未启动")
+            return
+        category = category.strip()
+        if not category:
+            yield event.plain_result("用法：/原史目录 <分类>，例如 /原史目录 角色")
+            return
+        try:
+            catalog = await self.service.genshin_history_catalog()
+            categories = sorted({str(item["category"]) for item in catalog})
+            selected = [item for item in catalog if str(item["category"]) == category]
+            if not selected:
+                suggestions = "、".join(name for name in categories if category in name) or "、".join(categories[:12])
+                yield event.plain_result(f"没有找到分类“{category}”。可用分类：{suggestions}")
+                return
+            html = self.service.genshin_history_directory_html(category, selected)
+            yield event.image_result(await self.renderer.render(html, viewport_width=1200))
+        except Exception as error:
+            logger.exception("Earth-K 原史目录查询失败")
+            yield event.plain_result(f"原史目录获取失败：{error}")
+
+    @filter.command("原史")
+    async def genshin_history(self, event: AstrMessageEvent, query: str = ""):
+        event.stop_event()
+        if not self.renderer:
+            yield event.plain_result("本地 HTML 渲染器未启动")
+            return
+        query = query.strip()
+        if not query:
+            yield event.plain_result("用法：/原史 <名称>；发送 /原史目录 <分类> 查看分类目录")
+            return
+        try:
+            entry, matches = await self.service.genshin_history_find(query)
+            if entry is None:
+                if matches:
+                    names = "、".join(str(item["title"]) for item in matches[:12])
+                    yield event.plain_result(f"找到多个条目，请输入更完整的名称：{names}")
+                else:
+                    yield event.plain_result("没有找到对应条目，请先使用 /原史目录 角色 查看目录。")
+                return
+            detail = await self.service.genshin_history_detail(entry)
+            html = self.service.genshin_history_article_html(detail)
+            yield event.image_result(await self.renderer.render(html, viewport_width=1200))
+        except Exception as error:
+            logger.exception("Earth-K 原史查询失败")
+            yield event.plain_result(f"原史查询失败：{error}")
+
     @filter.command("大话骰规则")
     async def dice_rules(self, event: AstrMessageEvent):
         event.stop_event()
