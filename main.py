@@ -50,6 +50,7 @@ class EarthKPlugin(Star):
         self._station_timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._marry_games: dict[str, list[dict[str, str]]] = {}
         self._game_sessions: dict[str, dict[str, object]] = {}
+        self._history_choices: dict[str, list[dict[str, object]]] = {}
 
     async def initialize(self) -> None:
         data_dir = Path(StarTools.get_data_dir(self.name))
@@ -76,6 +77,7 @@ class EarthKPlugin(Star):
         self._station_games.clear()
         self._marry_games.clear()
         self._game_sessions.clear()
+        self._history_choices.clear()
         if self.renderer:
             await self.renderer.stop()
 
@@ -1558,12 +1560,25 @@ class EarthKPlugin(Star):
         if not query:
             yield event.plain_result("用法：/原史 <名称>；发送 /原史目录 <分类> 查看分类目录")
             return
+        session = str(event.unified_msg_origin)
+        self._history_choices.pop(session, None)
         try:
             entry, matches = await self.service.genshin_history_find(query)
             if entry is None:
                 if matches:
-                    names = "、".join(str(item["title"]) for item in matches[:12])
-                    yield event.plain_result(f"找到多个条目，请输入更完整的名称：{names}")
+                    choices = matches[:12]
+                    self._history_choices[session] = choices
+                    lines = []
+                    for index, item in enumerate(choices, 1):
+                        title = str(item.get("title") or "未知条目")
+                        category = str(item.get("category") or "未分类")
+                        content_id = str(item.get("content_id") or item.get("id") or "未知")
+                        lines.append(f"{index}. {title}（{category}，ID: {content_id}）")
+                    yield event.plain_result(
+                        "找到多个条目，请选择编号：\n"
+                        + "\n".join(lines)
+                        + "\n请发送：/原史选择 <编号>"
+                    )
                 else:
                     yield event.plain_result("没有找到对应条目，请先使用 /原史目录 角色 查看目录。")
                 return
@@ -1572,6 +1587,31 @@ class EarthKPlugin(Star):
             yield event.image_result(await self.renderer.render(html, viewport_width=1200))
         except Exception as error:
             logger.exception("Earth-K 原史查询失败")
+            yield event.plain_result(f"原史查询失败：{error}")
+
+    @filter.command("原史选择")
+    async def genshin_history_choose(self, event: AstrMessageEvent, choice: str = ""):
+        event.stop_event()
+        if not self.renderer:
+            yield event.plain_result("本地 HTML 渲染器未启动")
+            return
+        session = str(event.unified_msg_origin)
+        choices = self._history_choices.get(session)
+        if not choices:
+            yield event.plain_result("当前没有待选择的原史条目，请先发送 /原史 <名称>。")
+            return
+        choice = choice.strip()
+        if not choice.isdigit() or int(choice) < 1 or int(choice) > len(choices):
+            yield event.plain_result(f"请输入 1-{len(choices)} 之间的编号：/原史选择 <编号>")
+            return
+        entry = choices[int(choice) - 1]
+        self._history_choices.pop(session, None)
+        try:
+            detail = await self.service.genshin_history_detail(entry)
+            html = self.service.genshin_history_article_html(detail)
+            yield event.image_result(await self.renderer.render(html, viewport_width=1200))
+        except Exception as error:
+            logger.exception("Earth-K 原史条目选择失败")
             yield event.plain_result(f"原史查询失败：{error}")
 
     @filter.command("大话骰规则")
