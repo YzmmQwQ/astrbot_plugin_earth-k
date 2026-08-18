@@ -464,8 +464,8 @@ class EarthService:
                 f'<div class="avatar">{avatar_html}</div>'
                 f'<div class="title">{html.escape(str(sponsor["name"]))}</div></div>'
             )
-        title = "土块插件-最近发电" if mode == "recent" else "土块插件-发电榜"
-        subtitle = "最近发电" if mode == "recent" else "发电排行"
+        title = "原 Earth-K-Plugin 最近发电" if mode == "recent" else "原 Earth-K-Plugin 发电榜"
+        subtitle = "原作者发电记录，与 AstrBot 版无关"
         return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
 {css}
 @font-face {{ font-family: "tttgbnumber"; src: url("{self._asset_uri(self.resources / "font" / "tttgbnumber.ttf")}"); }}
@@ -473,7 +473,7 @@ class EarthService:
 .head_box .genshin_logo {{ content: url("{header_logo}"); }}
 .rank-number {{ color: #d3bc8e; font-size: 20px; width: 32px; text-align: center; }}
 .avatar-fallback {{ width: 20px; height: 20px; border: 1px solid #e6d9be; border-radius: 50%; color: #e6d9be; text-align: center; line-height: 18px; }}
-.logo::after {{ content: "Created By AstrBot & Earth-K-Plugin"; }}
+.logo::after {{ content: "原 Earth-K-Plugin 作者：SmallK111407；与 AstrBot 迁移版作者 Yzmm 无关"; }}
 .logo {{ font-size: 0; }}
 </style></head><body><div class="container" id="container">
 <div class="head_box"><h1 class="id_text">{title}</h1><h1 class="day_text">{subtitle} - Top{limit_top}</h1><img class="genshin_logo" src="{header_logo}" /></div>
