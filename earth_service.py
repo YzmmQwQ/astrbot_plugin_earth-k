@@ -54,6 +54,11 @@ AFDIAN_HEADERS = {"User-Agent": "Mozilla/5.0 Earth-K AstrBot Plugin"}
 GAME_LIST_API = "https://www.yikm.net/nes"
 GAME_CATEGORIES = {"fc": 0, "街机": 9, "gba": 11}
 GAME_HEADERS = {"User-Agent": "Mozilla/5.0 Earth-K AstrBot Plugin"}
+ROLE_SPEAK_API = "https://api.lolimi.cn/API/yyhc/y.php"
+ROLE_SPEAK_HEADERS = {
+    "User-Agent": "Mozilla/5.0 Earth-K AstrBot Plugin",
+    "Referer": "https://zaiwen.xueban.org.cn/",
+}
 
 
 HELP_GROUPS = [
@@ -91,6 +96,7 @@ HELP_GROUPS = [
             ("/了解 <角色>", "发送本地角色资料图"),
             ("/角色语音汇总", "查看可用的原神角色语音"),
             ("/语音 <角色> [编号]", "播放角色中文语音"),
+            ("/角色说 <角色> <文本>", "使用外部角色语音合成"),
             ("/猜语音", "开始一轮原神猜语音"),
             ("/猜语音答案 <角色>", "回答当前猜语音"),
             ("/公布语音答案", "公布当前猜语音答案"),
@@ -948,6 +954,51 @@ class EarthService:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(payload)
         return output_path
+
+    async def character_speak(
+        self,
+        character: str,
+        text: str,
+        output_path: Path,
+    ) -> tuple[Path | None, str | None]:
+        """Generate character speech through the legacy public speech endpoint."""
+        character = character.strip()
+        text = text.strip()
+        if not character or not text:
+            return None, "用法：/角色说 <角色> <文本>"
+        timeout = aiohttp.ClientTimeout(total=60)
+        params = {
+            "msg": text,
+            "speaker": character,
+            "Length": "1",
+            "noisew": "0.8",
+            "sdp": "0.4",
+            "noise": "0.6",
+            "type": "",
+        }
+        try:
+            async with aiohttp.ClientSession(headers=ROLE_SPEAK_HEADERS, timeout=timeout) as session:
+                async with session.get(ROLE_SPEAK_API, params=params) as response:
+                    if response.status != 200:
+                        return None, f"角色语音服务返回 HTTP {response.status}"
+                    payload = await response.json(content_type=None)
+                music = payload.get("music") if isinstance(payload, dict) else None
+                if not music and isinstance(payload, dict):
+                    data = payload.get("data")
+                    music = data.get("music") if isinstance(data, dict) else None
+                if not isinstance(music, str) or not music.startswith(("http://", "https://")):
+                    return None, "角色语音服务没有返回音频"
+                async with session.get(music) as audio_response:
+                    if audio_response.status != 200:
+                        return None, f"角色语音下载失败 HTTP {audio_response.status}"
+                    audio = await audio_response.read()
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as error:
+            return None, f"角色语音服务暂时不可用：{error}"
+        if not audio:
+            return None, "角色语音服务返回了空音频"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(audio)
+        return output_path, None
 
     async def genshin_video_catalog(self, category: str) -> list[dict[str, object]]:
         """Load the two video directories used by the legacy 原神视频 command."""

@@ -1802,6 +1802,25 @@ class EarthKPlugin(Star):
             Comp.Record.fromFileSystem(str(result)),
         ])
 
+    @filter.command("角色说")
+    async def character_say(self, event: AstrMessageEvent, payload: GreedyStr = ""):
+        event.stop_event()
+        parts = payload.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            yield event.plain_result("用法：/角色说 <角色> <文本>")
+            return
+        character, text = parts
+        output_dir = self.data_dir or Path(StarTools.get_data_dir(self.name))
+        output = output_dir / "audio" / f"earth-k-role-{uuid4().hex}.mp3"
+        result, error = await self.service.character_speak(character, text, output)
+        if error:
+            yield event.plain_result(error)
+            return
+        yield event.chain_result([
+            Comp.Plain(text=f"{character}：{text}"),
+            Comp.Record.fromFileSystem(str(result)),
+        ])
+
     @filter.command("土块表情列表")
     async def meme_list(self, event: AstrMessageEvent):
         event.stop_event()
